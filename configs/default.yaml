@@ -1,0 +1,53 @@
+# Конфиг пайплауна СППВР (печень). Все пути/гиперпараметры — здесь, не в коде.
+# Обучение запускается на удалённом GPU-девайсе; код device-agnostic.
+
+project:
+  name: liver-sppvr
+  seed: 2023
+
+device: auto          # auto | cuda | cpu  (auto -> cuda если доступно, иначе cpu)
+
+# --- Геометрия SegVol (не менять без необходимости) ---
+segvol:
+  pretrain_ckpt: ""                 # путь к весам SegVol на GPU-девайсе
+  clip_ckpt: "../SegVol/config/clip"
+  spatial_size: [32, 256, 256]      # roi_size (D, H, W)
+  patch_size:   [4, 16, 16]
+  embed_dim: 768                    # размер эмбеддинга ViT (feat_shape = roi/patch = 8x16x16)
+
+# --- Мультифазность ---
+multiphase:
+  phases: [non_contrast, arterial, portal, delayed]   # 4 фазы КТ
+  fusion: attention                 # concat_stem | attention
+  hu_window: [-175, 250]            # окно HU -> [0,1]
+
+# --- Классификационная голова ---
+classifier:
+  num_classes: 5                    # HCC, ICC, CRLM, BCLM, HH (по MCT-LTDiag)
+  class_names: [HCC, ICC, CRLM, BCLM, HH]
+  hidden_dim: 256
+  dropout: 0.3
+  pool: masked                      # masked | gap  (masked -> пулинг по маске опухоли)
+
+# --- Данные ---
+data:
+  manifest: "data/manifest.csv"     # image_path, mask_path, tumor_type, dataset, phase, patient_id
+  train_datasets: [MCT-LTDiag]
+  external_val_datasets: [HCC-TACE-Seg, Colorectal-Liver-Metastases]
+
+# --- Обучение (multi-task: seg + cls) ---
+train:
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_epoch: 10
+  num_epochs: 200
+  batch_size: 2
+  loss_weights:
+    seg: 1.0
+    cls: 1.0
+  work_dir: "./work_dir"
+
+# --- Радиомика (PyRadiomics) ---
+radiomics:
+  params: "configs/radiomics_params.yaml"
+  feature_classes: [shape, firstorder, glcm, glrlm, glszm]
