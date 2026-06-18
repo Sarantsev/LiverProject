@@ -104,7 +104,8 @@ class SegVolMultiTask(nn.Module):
             "segment() требует prompt_encoder и mask_decoder."
         if boxes is not None and boxes.dim() == 2:
             boxes = boxes[:, None, :]
-        text_embedding = self.text_encoder(text) if (text is not None and self.text_encoder) else None
+        text_embedding = (self.text_encoder(text, embedding.device)
+                          if (text is not None and self.text_encoder) else None)
         sparse_emb, dense_emb = self.prompt_encoder(
             points=points, boxes=boxes, masks=None, text_embedding=text_embedding,
         )
