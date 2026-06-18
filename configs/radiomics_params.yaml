@@ -1,0 +1,22 @@
+# Параметры экстракции PyRadiomics (стандартизация для воспроизводимости).
+# Документация: https://pyradiomics.readthedocs.io/en/latest/customization.html
+
+setting:
+  binWidth: 25
+  resampledPixelSpacing: [1, 1, 1]   # изотропный ресэмплинг (мм)
+  interpolator: sitkBSpline
+  normalize: true
+  normalizeScale: 100
+  label: 1                           # значение метки опухоли в маске
+
+imageType:
+  Original: {}
+  # LoG: {sigma: [1.0, 3.0]}         # включить при необходимости
+  # Wavelet: {}
+
+featureClass:
+  shape:
+  firstorder:
+  glcm:
+  glrlm:
+  glszm:

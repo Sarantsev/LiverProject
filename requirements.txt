@@ -1,0 +1,15 @@
+# Совместимо с уже развёрнутым ../segvol_env (torch 1.13.1+cu117, monai 0.9.0)
+# Базовые зависимости SegVol (см. SegVol/README.md):
+#   monai[all]==0.9.0, einops==0.6.1, transformers==4.18.0, matplotlib
+# Ниже — дополнительные пакеты для нашего пайплайна (классификация + радиомика).
+
+numpy
+pandas
+pyyaml
+requests           # скачивание датасетов TCIA (scripts/download_tcia.py)
+scikit-learn
+SimpleITK
+nibabel
+pyradiomics            # радиомический модуль (Этап 4)
+tqdm
+tensorboardX
