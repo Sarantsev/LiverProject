@@ -30,8 +30,21 @@ echo "=== 3/4 Установка torch 1.13.1 + cu117 ==="
 pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 \
     --extra-index-url https://download.pytorch.org/whl/cu117
 
-echo "=== 4/4 Установка зависимостей пайплайна ==="
+echo "=== 4/5 Установка зависимостей пайплайна ==="
 pip install -r requirements-train.txt
+
+echo "=== 5/5 Установка pyradiomics (опционально, отдельным шагом) ==="
+# Сборка pyradiomics через pip падает из-за изоляции build-env (нет numpy).
+# Ставим build-зависимости в сам venv и отключаем изоляцию.
+pip install "cython<3" numpy==1.26.4
+if pip install pyradiomics==3.0.1 --no-build-isolation; then
+    echo "pyradiomics установлен."
+else
+    echo "!! pyradiomics не собрался. Пайплайн работает и без него (graceful skip)."
+    echo "   Фолбэк 1 (git, с фиксами под numpy>=1.24):"
+    echo "     pip install \"cython<3\" --no-build-isolation git+https://github.com/AIM-Harvard/pyradiomics.git"
+    echo "   Фолбэк 2 (conda, надёжнее):  conda install -c conda-forge pyradiomics"
+fi
 
 echo "=== Проверка ==="
 python - <<'PY'
