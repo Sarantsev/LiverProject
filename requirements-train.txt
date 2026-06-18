@@ -25,7 +25,13 @@ SimpleITK==2.5.5
 pyyaml
 
 # --- радиомика ---
-pyradiomics            # если не собирается через pip — см. conda-фолбэк в setup_env.sh
+# pyradiomics НЕ ставим здесь: его сборка через pip падает из-за изоляции build-env
+# (ModuleNotFoundError: numpy) + битые метаданные 3.1.0. Ставится отдельным шагом
+# в scripts/setup_env.sh:
+#   pip install "cython<3" numpy==1.26.4
+#   pip install pyradiomics==3.0.1 --no-build-isolation
+# Фолбэк: conda install -c conda-forge pyradiomics
+# Радиомика опциональна — без неё пайплайн работает (graceful skip).
 
 # --- утилиты ---
 tqdm==4.68.2
