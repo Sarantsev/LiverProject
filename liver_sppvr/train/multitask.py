@@ -120,6 +120,9 @@ def main():
                                         hu_window=cfg["multiphase"]["hu_window"],
                                         patient_ids=va_ids)
         model = build_segvol_multitask(cfg, device)
+        if torch.cuda.device_count() > 1:
+            print(f"DataParallel: {torch.cuda.device_count()} GPU")
+            model = torch.nn.DataParallel(model)
         train_labels = [labels_by_patient[p] for p in tr_ids]
 
     train_loader = DataLoader(train_ds, batch_size=tcfg["batch_size"], shuffle=True,
@@ -151,7 +154,8 @@ def main():
         score = ev.get("macro_f1", ev.get("accuracy", 0.0))
         if score is not None and score > best:
             best = score
-            torch.save({"epoch": epoch, "model": model.state_dict(), "config": cfg},
+            _m = model.module if isinstance(model, torch.nn.DataParallel) else model
+            torch.save({"epoch": epoch, "model": _m.state_dict(), "config": cfg},
                        os.path.join(work_dir, "best.pth"))
     print(f"Готово. Лучший score={best:.4f}. Чекпойнт: {os.path.join(work_dir, 'best.pth')}")
 

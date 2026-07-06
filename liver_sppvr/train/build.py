@@ -60,8 +60,8 @@ class StubMultiTask(nn.Module):
         self.seg_out = nn.Conv3d(hidden, 1, 1)
         self.cls = nn.Linear(hidden, num_classes)
 
-    def forward(self, phases=None, image=None, seg_prompt=None, cls_mask=None,
-                cls_extra_feat=None, return_seg=True, return_cls=True) -> dict:
+    def forward(self, phases=None, image=None, seg_prompt=None, seg_text=None,
+                cls_mask=None, cls_extra_feat=None, return_seg=True, return_cls=True) -> dict:
         x = phases.mean(1) if phases is not None else image   # (B,1,D,H,W)
         h = self.stem(x)
         out = {}

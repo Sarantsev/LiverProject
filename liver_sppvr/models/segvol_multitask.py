@@ -131,6 +131,7 @@ class SegVolMultiTask(nn.Module):
         image=None,
         phases=None,
         seg_prompt: Optional[dict] = None,
+        seg_text: Optional[str] = None,
         cls_mask: Optional[torch.Tensor] = None,
         cls_extra_feat: Optional[torch.Tensor] = None,
         return_seg: bool = True,
@@ -154,7 +155,11 @@ class SegVolMultiTask(nn.Module):
 
         seg_logits = None
         if return_seg and self.mask_decoder is not None:
-            prompt = seg_prompt or {}
+            prompt = dict(seg_prompt or {})
+            # текст строим здесь, по локальному батчу — иначе DataParallel неверно
+            # раскидывает готовый список по картам (см. engine.py).
+            if seg_text is not None and prompt.get("text") is None:
+                prompt["text"] = [seg_text] * embedding.shape[0]
             seg_logits = self.segment(embedding, img_shape, **prompt)
             out["seg_logits"] = seg_logits
 
