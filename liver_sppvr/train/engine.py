@@ -37,10 +37,9 @@ def train_one_epoch(model, loader, optimizer, loss_fn, device, *,
     for batch in loader:
         batch = _batch_to_device(batch, device)
         bs = batch["label"].shape[0]
-        seg_prompt = {"text": [seg_text] * bs}
 
         optimizer.zero_grad()
-        out = model(phases=batch["phases"], seg_prompt=seg_prompt,
+        out = model(phases=batch["phases"], seg_text=seg_text,
                     cls_mask=batch["mask"], return_seg=True, return_cls=True)
         losses = loss_fn(out, {"mask": batch["mask"], "label": batch["label"]})
         losses["loss"].backward()
@@ -62,8 +61,7 @@ def evaluate(model, loader, device, *, num_classes: int, seg_text: str = "liver 
     dices, y_true, y_pred = [], [], []
     for batch in loader:
         batch = _batch_to_device(batch, device)
-        bs = batch["label"].shape[0]
-        out = model(phases=batch["phases"], seg_prompt={"text": [seg_text] * bs},
+        out = model(phases=batch["phases"], seg_text=seg_text,
                     cls_mask=batch["mask"], return_seg=True, return_cls=True)
         if out.get("seg_logits") is not None:
             dices.append(_dice_score(out["seg_logits"], batch["mask"]))
