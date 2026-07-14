@@ -40,13 +40,24 @@ def build_segvol_multitask(cfg: dict, device) -> SegVolMultiTask:
 
     cls = cfg["classifier"]
     mp = cfg["multiphase"]
+    # hybrid: resolve the segmentation phase name -> index (None -> seg uses fused embedding)
+    seg_phase = mp.get("seg_phase")
+    seg_phase_idx = None
+    if seg_phase:
+        if seg_phase not in mp["phases"]:
+            raise ValueError(f"multiphase.seg_phase={seg_phase!r} not in phases {mp['phases']}")
+        seg_phase_idx = mp["phases"].index(seg_phase)
     model = SegVolMultiTask.from_segvol(
         inner,
         roi_size=tuple(sv["spatial_size"]), patch_size=tuple(sv["patch_size"]),
         embed_dim=sv["embed_dim"], num_classes=cls["num_classes"],
         cls_hidden_dim=cls["hidden_dim"], cls_dropout=cls["dropout"],
         cls_pool=cls["pool"], fusion_mode=mp["fusion"], n_phases=len(mp["phases"]),
+        seg_phase_idx=seg_phase_idx,
     )
+    if seg_phase_idx is not None:
+        print(f"hybrid: segmentation on phase '{seg_phase}' (idx {seg_phase_idx}), "
+              f"classification on all {len(mp['phases'])} phases")
     lora_cfg = sv.get("lora") or {}
     if lora_cfg.get("enabled", False):
         from ..models.lora import apply_lora

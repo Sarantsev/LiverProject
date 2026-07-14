@@ -28,6 +28,7 @@ class SegVolMultiTask(nn.Module):
         cls_extra_feat_dim: int = 0,
         fusion_mode: str = "attention",
         n_phases: int = 4,
+        seg_phase_idx: Optional[int] = None,
     ):
         super().__init__()
         self.image_encoder = image_encoder
@@ -38,6 +39,9 @@ class SegVolMultiTask(nn.Module):
         self.feat_shape = (np.array(roi_size) / np.array(patch_size)).astype(int)  # (d,h,w)
         self.embed_dim = embed_dim
         self.n_phases = n_phases
+        # hybrid: if set, segmentation uses only this phase's embedding (on-distribution
+        # for the pretrained SegVol decoder); classification always uses the fused embedding.
+        self.seg_phase_idx = seg_phase_idx
 
         self.phase_fusion = PhaseFusion(mode=fusion_mode, n_phases=n_phases, embed_dim=embed_dim)
         self.cls_head = TumorClassificationHead(
@@ -71,10 +75,11 @@ class SegVolMultiTask(nn.Module):
         return emb
 
     def encode_multiphase(self, phases: torch.Tensor):
-        """phases: (B, P, 1, D, H, W) (or (B,P,D,H,W)) -> (embedding, phase_weights|None).
+        """phases: (B, P, 1, D, H, W) (or (B,P,D,H,W)) -> (fused, phase_weights|None, per_phase|None).
 
-        concat_stem: fuse into 1 channel, then a single encoder pass.
-        attention:   encode each phase, then attention-fuse the embeddings.
+        concat_stem: fuse into 1 channel, then a single encoder pass (no per-phase embeddings).
+        attention:   encode each phase, then attention-fuse; per-phase embeddings are also
+                     returned (B,P,C,d,h,w) so the hybrid can pick a single phase for seg.
         """
         if phases.dim() == 6:
             phases = phases  # (B,P,1,D,H,W)
@@ -87,7 +92,7 @@ class SegVolMultiTask(nn.Module):
         if self.phase_fusion.mode == "concat_stem":
             fused_img = self.phase_fusion.fuse_input(phases.squeeze(2))  # (B,1,D,H,W)
             emb = self.encode(fused_img)
-            return emb, None
+            return emb, None, None
 
         # attention: encode each phase separately
         embs = []
@@ -95,7 +100,7 @@ class SegVolMultiTask(nn.Module):
             embs.append(self.encode(phases[:, i]))       # (B,C,d,h,w)
         phase_embeddings = torch.stack(embs, dim=1)      # (B,P,C,d,h,w)
         fused, weights = self.phase_fusion.fuse_embeddings(phase_embeddings)
-        return fused, weights
+        return fused, weights, phase_embeddings
 
     # ---------- segmentation (replica of SegVol.forward_decoder) ----------
     def segment(self, embedding, img_shape, text=None, boxes=None, points=None):
@@ -150,11 +155,17 @@ class SegVolMultiTask(nn.Module):
         with torch.cuda.amp.autocast(enabled=getattr(self, "_amp_enabled", False)):
             out: dict = {}
             if phases is not None:
-                embedding, phase_weights = self.encode_multiphase(phases)
+                cls_embedding, phase_weights, phase_embs = self.encode_multiphase(phases)
                 out["phase_weights"] = phase_weights
                 img_shape = phases.shape[-3:]
+                # hybrid: segmentation on a single phase (PVP) if seg_phase_idx is set and
+                # per-phase embeddings are available; classification on the fused embedding.
+                if self.seg_phase_idx is not None and phase_embs is not None:
+                    seg_embedding = phase_embs[:, self.seg_phase_idx]  # (B,C,d,h,w)
+                else:
+                    seg_embedding = cls_embedding
             else:
-                embedding = self.encode(image)
+                seg_embedding = cls_embedding = self.encode(image)
                 img_shape = image.shape[-3:]
 
             seg_logits = None
@@ -163,14 +174,14 @@ class SegVolMultiTask(nn.Module):
                 # Build the text here, per local batch -- otherwise DataParallel splits a
                 # pre-built list across devices incorrectly (see engine.py).
                 if seg_text is not None and prompt.get("text") is None:
-                    prompt["text"] = [seg_text] * embedding.shape[0]
-                seg_logits = self.segment(embedding, img_shape, **prompt)
+                    prompt["text"] = [seg_text] * seg_embedding.shape[0]
+                seg_logits = self.segment(seg_embedding, img_shape, **prompt)
                 out["seg_logits"] = seg_logits
 
             if return_cls:
                 mask = cls_mask
                 if mask is None and seg_logits is not None and self.cls_head.pool == "masked":
                     mask = (torch.sigmoid(seg_logits) > 0.5).float()
-                out["cls_logits"] = self.classify(embedding, mask=mask, extra_feat=cls_extra_feat)
+                out["cls_logits"] = self.classify(cls_embedding, mask=mask, extra_feat=cls_extra_feat)
 
         return out

@@ -94,6 +94,9 @@ def main():
                     help="zoom-in on validation (overrides train.zoom_eval)")
     ap.add_argument("--normalize", choices=["hu", "foreground"], default=None,
                     help="input normalization (overrides preprocess.normalize)")
+    ap.add_argument("--seg-phase", default=None,
+                    help="hybrid: phase name for segmentation (e.g. portal); 'all' = fused embedding "
+                         "(overrides multiphase.seg_phase)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -107,6 +110,8 @@ def main():
         cfg["train"]["zoom_eval"] = True
     if args.normalize:
         cfg.setdefault("preprocess", {})["normalize"] = args.normalize
+    if args.seg_phase:
+        cfg["multiphase"]["seg_phase"] = None if args.seg_phase == "all" else args.seg_phase
     set_seed(cfg["project"]["seed"])
     device = resolve_device(args.device or cfg.get("device", "auto"))
     num_classes = cfg["classifier"]["num_classes"]
