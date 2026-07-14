@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import random
-from typing import Optional
 
 import numpy as np
 import torch
@@ -23,21 +22,21 @@ def set_seed(seed: int = 2023) -> None:
 
 
 def build_segvol_multitask(cfg: dict, device) -> SegVolMultiTask:
-    """Реальная модель: предобученный SegVol + наши головы. Запускать на GPU-девайсе."""
-    from transformers import AutoModel, AutoTokenizer  # ленивый импорт
+    """Real model: pretrained SegVol + our heads. Run on the GPU box."""
+    from transformers import AutoModel, AutoTokenizer  # lazy import
 
     sv = cfg["segvol"]
     tokenizer = AutoTokenizer.from_pretrained("BAAI/SegVol")
     hf = AutoModel.from_pretrained("BAAI/SegVol", trust_remote_code=True, test_mode=False)
-    # внутренний SegVol-модуль (см. run_segvol_liver.py: hf.model.text_encoder...)
+    # inner SegVol module (see run_segvol_liver.py: hf.model.text_encoder...)
     inner = getattr(hf, "model", hf)
     if hasattr(inner, "text_encoder"):
         inner.text_encoder.tokenizer = tokenizer
     for attr in ("image_encoder", "prompt_encoder", "mask_decoder"):
         if not hasattr(inner, attr):
             raise AttributeError(
-                f"У загруженной модели SegVol нет '{attr}'. "
-                f"Доступные атрибуты: {list(vars(inner).keys())[:20]}")
+                f"The loaded SegVol model has no '{attr}'. "
+                f"Available attributes: {list(vars(inner).keys())[:20]}")
 
     cls = cfg["classifier"]
     mp = cfg["multiphase"]
@@ -48,12 +47,32 @@ def build_segvol_multitask(cfg: dict, device) -> SegVolMultiTask:
         cls_hidden_dim=cls["hidden_dim"], cls_dropout=cls["dropout"],
         cls_pool=cls["pool"], fusion_mode=mp["fusion"], n_phases=len(mp["phases"]),
     )
+    lora_cfg = sv.get("lora") or {}
+    if lora_cfg.get("enabled", False):
+        from ..models.lora import apply_lora
+        set_encoder_trainable(model, False)               # encoder base frozen
+        n = apply_lora(model.image_encoder, targets=lora_cfg.get("targets", ["qkv"]),
+                       rank=lora_cfg.get("rank", 8), alpha=lora_cfg.get("alpha", 16.0),
+                       dropout=lora_cfg.get("dropout", 0.0))
+        n_train = sum(p.numel() for p in model.image_encoder.parameters() if p.requires_grad)
+        print(f"LoRA: wrapped {n} encoder Linear layers, trainable in encoder {n_train/1e6:.3f}M")
+    elif sv.get("freeze_encoder", False):
+        set_encoder_trainable(model, False)
+        n_frozen = sum(p.numel() for p in model.image_encoder.parameters())
+        print(f"image_encoder frozen ({n_frozen/1e6:.1f}M params not trained)")
     return model.to(device)
 
 
-# ----------------- заглушка для dry-run на CPU -----------------
+def set_encoder_trainable(model, trainable: bool) -> None:
+    """Freeze/unfreeze the SegVol ViT encoder (works with DataParallel too)."""
+    m = model.module if hasattr(model, "module") else model
+    for p in m.image_encoder.parameters():
+        p.requires_grad_(trainable)
+
+
+# ----------------- stub for CPU dry-run -----------------
 class StubMultiTask(nn.Module):
-    """Лёгкая модель с тем же интерфейсом forward, что и SegVolMultiTask."""
+    """Lightweight model with the same forward interface as SegVolMultiTask."""
     def __init__(self, num_classes: int = 5, hidden: int = 8):
         super().__init__()
         self.stem = nn.Sequential(nn.Conv3d(1, hidden, 3, padding=1), nn.GELU())

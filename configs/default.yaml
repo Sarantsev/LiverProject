@@ -1,53 +1,70 @@
-# Конфиг пайплауна СППВР (печень). Все пути/гиперпараметры — здесь, не в коде.
-# Обучение запускается на удалённом GPU-девайсе; код device-agnostic.
-
 project:
   name: liver-sppvr
   seed: 2023
 
-device: auto          # auto | cuda | cpu  (auto -> cuda если доступно, иначе cpu)
+device: auto          # auto | cuda | cpu  (auto -> cuda if available, else cpu)
 
-# --- Геометрия SegVol (не менять без необходимости) ---
+# --- SegVol geometry (do not change without good reason) ---
 segvol:
-  pretrain_ckpt: ""                 # путь к весам SegVol на GPU-девайсе
-  clip_ckpt: "../SegVol/config/clip"
+  pretrain_ckpt: ""                 # path to SegVol weights on the GPU box
   spatial_size: [32, 256, 256]      # roi_size (D, H, W)
   patch_size:   [4, 16, 16]
-  embed_dim: 768                    # размер эмбеддинга ViT (feat_shape = roi/patch = 8x16x16)
+  embed_dim: 768                    # ViT embedding size (feat_shape = roi/patch = 8x16x16)
+  freeze_encoder: true              # freeze the SegVol ViT encoder -> main anti-overfit lever
+  unfreeze_epoch: -1                # -1 = never unfreeze; N = unfreeze the encoder from epoch N
+  lora:                             # LoRA on the encoder instead of a full freeze (takes priority over freeze_encoder)
+    enabled: false                  # true -> encoder base frozen + trainable low-rank A/B
+    rank: 8
+    alpha: 16
+    dropout: 0.05
+    targets: [qkv]                  # substrings of encoder Linear layer names to wrap with LoRA
 
-# --- Мультифазность ---
+# --- Multi-phase ---
 multiphase:
-  phases: [non_contrast, arterial, portal, delayed]   # 4 фазы КТ
+  phases: [non_contrast, arterial, portal, delayed]   # 4 CT phases
   fusion: attention                 # concat_stem | attention
-  hu_window: [-175, 250]            # окно HU -> [0,1]
+  hu_window: [-175, 250]            # HU window -> [0,1] (used only when normalize=hu)
 
-# --- Классификационная голова ---
+# --- Preprocessing ---
+preprocess:
+  normalize: foreground             # foreground (SegVol ForegroundNorm, z-score) | hu ([0,1] window)
+  crop_foreground: true             # crop the body before resize (analog of SegVol CropForeground)
+
+# --- Classification head ---
 classifier:
-  num_classes: 5                    # HCC, ICC, CRLM, BCLM, HH (по MCT-LTDiag)
+  num_classes: 5                    # HCC, ICC, CRLM, BCLM, HH (per MCT-LTDiag)
   class_names: [HCC, ICC, CRLM, BCLM, HH]
   hidden_dim: 256
   dropout: 0.3
-  pool: masked                      # masked | gap  (masked -> пулинг по маске опухоли)
+  pool: masked                      # masked | gap  (masked -> pool over the tumor mask)
 
-# --- Данные ---
+# --- Data ---
 data:
   manifest: "data/manifest.csv"     # image_path, mask_path, tumor_type, dataset, phase, patient_id
-  train_datasets: [MCT-LTDiag]
-  external_val_datasets: [HCC-TACE-Seg, Colorectal-Liver-Metastases]
 
-# --- Обучение (multi-task: seg + cls) ---
+# --- Training (multi-task: seg + cls) ---
 train:
   lr: 1.0e-4
-  weight_decay: 1.0e-5
+  weight_decay: 1.0e-2   # increased (was 1e-5) against overfitting
   warmup_epoch: 10
-  num_epochs: 200
+  num_epochs: 80         # reduced from 200: optimum was < epoch 40, overfit beyond
   batch_size: 2
+  num_workers: 0         # DataLoader workers; >0 removes the GPU stall on NIfTI resampling
+  amp: false             # mixed precision (torch.cuda.amp); saves VRAM and speeds up on GPU
+  augment: true          # 3D augmentations on train (flips + intensity jitter)
+  early_stop_patience: 20  # stop if val score does not improve for N epochs (0 = off)
+  seg_prompt: text       # text | box  (box -> box from the GT mask, SegVol's strong native mode)
+  bbox_shift: 10         # box jitter on train, in voxels (prompt augmentation; no jitter on eval)
+  # --- zoom-in (analog of SegVol zoom-out-zoom-in) ---
+  zoom: 0.0              # probability of a zoom-in crop on train [0..1] (0.5 = half the samples; 0 = off)
+  zoom_eval: false       # true -> validation always in zoom-in (only compare dice with a zoom-in run!)
+  zoom_margin: 0.5       # context margin around the tumor (fraction of tumor extent on each side)
   loss_weights:
     seg: 1.0
     cls: 1.0
   work_dir: "./work_dir"
 
-# --- Радиомика (PyRadiomics) ---
+# --- Radiomics (PyRadiomics) ---
 radiomics:
   params: "configs/radiomics_params.yaml"
   feature_classes: [shape, firstorder, glcm, glrlm, glszm]

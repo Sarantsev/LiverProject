@@ -1,8 +1,8 @@
-"""Лоссы для multi-task обучения (device-agnostic, без хардкода .cuda()).
+"""Losses for multi-task training (device-agnostic, no hard-coded .cuda()).
 
-Сегментация: Dice + BCEWithLogits (как в SegVol).
-Классификация: Focal/CE с поддержкой весов классов (важно из-за дисбаланса
-редких классов BCLM/HH).
+Segmentation: Dice + BCEWithLogits (as in SegVol).
+Classification: Focal/CE with class-weight support (important due to the imbalance
+of the rare classes BCLM/HH).
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import torch.nn.functional as F
 
 
 def dice_bce_loss(logits: torch.Tensor, target: torch.Tensor, smooth: float = 1.0) -> torch.Tensor:
-    """Бинарная сегментация. logits и target: (B,1,D,H,W) или broadcast-совместимы."""
+    """Binary segmentation. logits and target: (B,1,D,H,W) or broadcast-compatible."""
     logits = logits.float()
     target = target.float()
     prob = torch.sigmoid(logits)
@@ -33,9 +33,9 @@ def focal_ce_loss(
     gamma: float = 2.0,
     weight: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Мультиклассовый focal loss. logits: (B,C); target: (B,) long.
+    """Multi-class focal loss. logits: (B,C); target: (B,) long.
 
-    gamma=0 -> обычная взвешенная кросс-энтропия.
+    gamma=0 -> ordinary weighted cross-entropy.
     """
     ce = F.cross_entropy(logits, target, weight=weight, reduction="none")  # (B,)
     pt = torch.exp(-ce)

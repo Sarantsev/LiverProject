@@ -16,10 +16,10 @@ def generate_report(
     seg_text: str = "liver tumor",
     radiomics_params: Optional[str] = None,
 ) -> dict:
-    """Вернуть dict-отчёт по одному пациенту.
+    """Return a per-patient report dict.
 
-    Поля: predicted_type, class_probs, tumor_voxels, tumor_volume_ml,
-          phase_weights (если fusion=attention), radiomics (если доступен PyRadiomics).
+    Fields: predicted_type, class_probs, tumor_voxels, tumor_volume_ml,
+            phase_weights (if fusion=attention), radiomics (if PyRadiomics is available).
     """
     model.eval()
     phases = phases.to(device)
@@ -44,14 +44,14 @@ def generate_report(
     if pw is not None:
         report["phase_weights"] = pw[0].cpu().numpy().tolist()
 
-    # радиомика по опорной фазе (по умолчанию портальная = индекс 2, если есть)
+    # radiomics on the reference phase (portal by default = index 2, if present)
     try:
         from ..radiomics import RADIOMICS_AVAILABLE, extract_from_arrays
         if RADIOMICS_AVAILABLE and voxels > 0:
             ref_phase = phases[0, min(2, phases.shape[1] - 1), 0].cpu().numpy()
             report["radiomics"] = extract_from_arrays(
                 ref_phase, mask, spacing=spacing_mm, params=radiomics_params)
-    except Exception as e:  # радиомика не критична для отчёта
+    except Exception as e:  # radiomics is not critical for the report
         report["radiomics_error"] = str(e)
 
     return report
