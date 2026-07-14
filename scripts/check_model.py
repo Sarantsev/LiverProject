@@ -1,9 +1,9 @@
-"""Проверка реальной модели: загрузка SegVol с HuggingFace + сборка наших голов
-+ forward на синтетике (без данных). Прогон на GPU де-рискует пайплайн до данных.
+"""Check the real model: load SegVol from HuggingFace + assemble our heads + forward on
+synthetic data (no dataset). Running this on the GPU de-risks the pipeline before data.
 
-Запуск (из корня репозитория):
-    python scripts/check_model.py                      # device=auto (cuda если есть)
-    python scripts/check_model.py --device cpu         # принудительно CPU (медленно)
+Run (from the repo root):
+    python scripts/check_model.py                      # device=auto (cuda if available)
+    python scripts/check_model.py --device cpu         # force CPU (slow)
     python scripts/check_model.py --config configs/default.yaml
 """
 import argparse
@@ -19,10 +19,10 @@ from liver_sppvr.utils.device import resolve_device
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Smoke-проверка реальной модели SegVol + головы.")
+    ap = argparse.ArgumentParser(description="Smoke-test the real SegVol model + heads.")
     ap.add_argument("--config", default="configs/default.yaml")
     ap.add_argument("--device", default="auto", help="auto | cuda | cpu")
-    ap.add_argument("--batch", type=int, default=1, help="размер батча для теста")
+    ap.add_argument("--batch", type=int, default=1, help="batch size for the test")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -30,13 +30,13 @@ def main():
     n_phases = len(cfg["multiphase"]["phases"])
     d, h, w = cfg["segvol"]["spatial_size"]
 
-    print(f"device={dev} | фаз={n_phases} | объём={(d, h, w)}")
-    print("Гружу SegVol с HuggingFace (первый раз скачает веса ~сотни МБ)...")
+    print(f"device={dev} | phases={n_phases} | volume={(d, h, w)}")
+    print("Loading SegVol from HuggingFace (first run downloads weights, ~hundreds of MB)...")
     model = build_segvol_multitask(cfg, dev)
     n_params = sum(p.numel() for p in model.parameters())
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Модель собрана на {dev} | параметров: {n_params/1e6:.1f}M "
-          f"(обучаемых: {n_train/1e6:.1f}M)")
+    print(f"Model built on {dev} | params: {n_params/1e6:.1f}M "
+          f"(trainable: {n_train/1e6:.1f}M)")
 
     phases = torch.rand(args.batch, n_phases, 1, d, h, w, device=dev)
     model.eval()
@@ -44,14 +44,14 @@ def main():
         out = model(phases=phases, seg_prompt={"text": ["liver tumor"] * args.batch},
                     return_seg=True, return_cls=True)
 
-    print("--- выходы forward ---")
+    print("--- forward outputs ---")
     for k, v in out.items():
         print(f"  {k}: {getattr(v, 'shape', v)}")
 
     if dev.type == "cuda":
         mem = torch.cuda.max_memory_allocated() / 1e9
-        print(f"пик VRAM: {mem:.2f} ГБ")
-    print("OK — реальный SegVol + головы работают.")
+        print(f"peak VRAM: {mem:.2f} GB")
+    print("OK -- real SegVol + heads work.")
 
 
 if __name__ == "__main__":

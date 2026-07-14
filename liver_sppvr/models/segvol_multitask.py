@@ -49,10 +49,10 @@ class SegVolMultiTask(nn.Module):
             extra_feat_dim=cls_extra_feat_dim,
         )
 
-    # ---------- фабрика из загруженной модели SegVol ----------
+    # ---------- factory from a loaded SegVol model ----------
     @classmethod
     def from_segvol(cls, segvol_model: nn.Module, **kwargs) -> "SegVolMultiTask":
-        """Собрать обёртку из компонентов уже инициализированной модели SegVol."""
+        """Build the wrapper from the components of an already-initialized SegVol model."""
         return cls(
             image_encoder=segvol_model.image_encoder,
             prompt_encoder=segvol_model.prompt_encoder,
@@ -61,7 +61,7 @@ class SegVolMultiTask(nn.Module):
             **kwargs,
         )
 
-    # ---------- энкодинг ----------
+    # ---------- encoding ----------
     def encode(self, image: torch.Tensor) -> torch.Tensor:
         """image: (B,1,D,H,W) -> embedding (B,C,d,h,w)."""
         bs = image.shape[0]
@@ -71,10 +71,10 @@ class SegVolMultiTask(nn.Module):
         return emb
 
     def encode_multiphase(self, phases: torch.Tensor):
-        """phases: (B, P, 1, D, H, W) (или (B,P,D,H,W)) -> (embedding, phase_weights|None).
+        """phases: (B, P, 1, D, H, W) (or (B,P,D,H,W)) -> (embedding, phase_weights|None).
 
-        concat_stem: fuse в 1 канал, затем один прогон энкодера.
-        attention:   энкодер по каждой фазе, затем attention-fusion эмбеддингов.
+        concat_stem: fuse into 1 channel, then a single encoder pass.
+        attention:   encode each phase, then attention-fuse the embeddings.
         """
         if phases.dim() == 6:
             phases = phases  # (B,P,1,D,H,W)
@@ -82,14 +82,14 @@ class SegVolMultiTask(nn.Module):
             phases = phases.unsqueeze(2)  # (B,P,1,D,H,W)
         else:
             raise ValueError(f"phases dim must be 5 or 6, got {phases.dim()}")
-        b, p = phases.shape[0], phases.shape[1]
+        p = phases.shape[1]
 
         if self.phase_fusion.mode == "concat_stem":
             fused_img = self.phase_fusion.fuse_input(phases.squeeze(2))  # (B,1,D,H,W)
             emb = self.encode(fused_img)
             return emb, None
 
-        # attention: кодируем каждую фазу отдельно
+        # attention: encode each phase separately
         embs = []
         for i in range(p):
             embs.append(self.encode(phases[:, i]))       # (B,C,d,h,w)
@@ -97,11 +97,11 @@ class SegVolMultiTask(nn.Module):
         fused, weights = self.phase_fusion.fuse_embeddings(phase_embeddings)
         return fused, weights
 
-    # ---------- сегментация (реплика SegVol.forward_decoder) ----------
+    # ---------- segmentation (replica of SegVol.forward_decoder) ----------
     def segment(self, embedding, img_shape, text=None, boxes=None, points=None):
         """embedding: (B,C,d,h,w) -> logits (B,1,D,H,W)."""
         assert self.prompt_encoder is not None and self.mask_decoder is not None, \
-            "segment() требует prompt_encoder и mask_decoder."
+            "segment() requires prompt_encoder and mask_decoder."
         if boxes is not None and boxes.dim() == 2:
             boxes = boxes[:, None, :]
         text_embedding = (self.text_encoder(text, embedding.device)
@@ -121,11 +121,11 @@ class SegVolMultiTask(nn.Module):
         logits = F.interpolate(low_res_masks, size=img_shape, mode="trilinear", align_corners=False)
         return logits
 
-    # ---------- классификация ----------
+    # ---------- classification ----------
     def classify(self, embedding, mask=None, extra_feat=None) -> torch.Tensor:
         return self.cls_head(embedding, mask=mask, extra_feat=extra_feat)
 
-    # ---------- общий проход (multi-task) ----------
+    # ---------- full multi-task pass ----------
     def forward(
         self,
         image=None,
@@ -137,36 +137,40 @@ class SegVolMultiTask(nn.Module):
         return_seg: bool = True,
         return_cls: bool = True,
     ) -> dict:
-        """Принимает либо одиночный image (B,1,D,H,W), либо phases (B,P,...).
+        """Accepts either a single image (B,1,D,H,W) or phases (B,P,...).
 
-        seg_prompt: dict с ключами text/boxes/points для сегментации.
-        cls_mask:   маска опухоли для masked-pooling классификатора (если pool='masked').
-                    Если None, при сегментации используется предсказанная маска.
-        return: {'seg_logits', 'cls_logits', 'phase_weights'} (наличие зависит от флагов).
+        seg_prompt: dict with keys text/boxes/points for segmentation.
+        cls_mask:   tumor mask for the masked-pooling classifier (if pool='masked').
+                    If None, the predicted mask is used instead.
+        return: {'seg_logits', 'cls_logits', 'phase_weights'} (presence depends on flags).
         """
-        out: dict = {}
-        if phases is not None:
-            embedding, phase_weights = self.encode_multiphase(phases)
-            out["phase_weights"] = phase_weights
-            img_shape = phases.shape[-3:]
-        else:
-            embedding = self.encode(image)
-            img_shape = image.shape[-3:]
+        # autocast lives inside forward -- otherwise AMP is not applied in the
+        # DataParallel replica threads (autocast is thread-local). The flag is set by
+        # the training script.
+        with torch.cuda.amp.autocast(enabled=getattr(self, "_amp_enabled", False)):
+            out: dict = {}
+            if phases is not None:
+                embedding, phase_weights = self.encode_multiphase(phases)
+                out["phase_weights"] = phase_weights
+                img_shape = phases.shape[-3:]
+            else:
+                embedding = self.encode(image)
+                img_shape = image.shape[-3:]
 
-        seg_logits = None
-        if return_seg and self.mask_decoder is not None:
-            prompt = dict(seg_prompt or {})
-            # текст строим здесь, по локальному батчу — иначе DataParallel неверно
-            # раскидывает готовый список по картам (см. engine.py).
-            if seg_text is not None and prompt.get("text") is None:
-                prompt["text"] = [seg_text] * embedding.shape[0]
-            seg_logits = self.segment(embedding, img_shape, **prompt)
-            out["seg_logits"] = seg_logits
+            seg_logits = None
+            if return_seg and self.mask_decoder is not None:
+                prompt = dict(seg_prompt or {})
+                # Build the text here, per local batch -- otherwise DataParallel splits a
+                # pre-built list across devices incorrectly (see engine.py).
+                if seg_text is not None and prompt.get("text") is None:
+                    prompt["text"] = [seg_text] * embedding.shape[0]
+                seg_logits = self.segment(embedding, img_shape, **prompt)
+                out["seg_logits"] = seg_logits
 
-        if return_cls:
-            mask = cls_mask
-            if mask is None and seg_logits is not None and self.cls_head.pool == "masked":
-                mask = (torch.sigmoid(seg_logits) > 0.5).float()
-            out["cls_logits"] = self.classify(embedding, mask=mask, extra_feat=cls_extra_feat)
+            if return_cls:
+                mask = cls_mask
+                if mask is None and seg_logits is not None and self.cls_head.pool == "masked":
+                    mask = (torch.sigmoid(seg_logits) > 0.5).float()
+                out["cls_logits"] = self.classify(embedding, mask=mask, extra_feat=cls_extra_feat)
 
         return out

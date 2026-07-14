@@ -1,7 +1,7 @@
-"""Device-agnostic выбор устройства.
+"""Device-agnostic device selection.
 
-Код разрабатывается на машине без GPU, а обучается на удалённом GPU-девайсе,
-поэтому устройство выбирается автоматически и нигде не хардкодится `.cuda()`.
+The code is developed on a machine without a GPU but trained on a remote GPU box,
+so the device is chosen automatically and `.cuda()` is never hard-coded anywhere.
 """
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ import torch
 
 
 def resolve_device(spec: str = "auto") -> torch.device:
-    """Вернуть torch.device по строке конфига.
+    """Return a torch.device from a config string.
 
-    spec: "auto" -> cuda если доступно, иначе cpu; либо явно "cuda"/"cpu".
+    spec: "auto" -> cuda if available, else cpu; or an explicit "cuda"/"cpu".
     """
     spec = (spec or "auto").lower()
     if spec == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if spec == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("device='cuda' запрошен, но CUDA недоступна на этой машине.")
+        raise RuntimeError("device='cuda' requested but CUDA is not available on this machine.")
     return torch.device(spec)

@@ -1,9 +1,9 @@
-"""CLI обучения multi-task (seg + cls). Single-device, config-driven.
+"""Multi-task (seg + cls) training CLI. Single-device, config-driven.
 
-Запуск на GPU-девайсе:
+Run on the GPU box:
     python -m liver_sppvr.train.multitask --config configs/default.yaml
 
-Проверка цикла на CPU без весов/данных:
+Smoke-test the loop on CPU without weights/data:
     python -m liver_sppvr.train.multitask --config configs/default.yaml --dry-run
 """
 from __future__ import annotations
@@ -22,9 +22,9 @@ from .engine import train_one_epoch, evaluate
 from .losses import MultiTaskLoss
 
 
-# --------- утилиты ---------
+# --------- utilities ---------
 def stratified_patient_split(labels_by_patient: dict, val_frac: float = 0.2, seed: int = 2023):
-    """labels_by_patient: {patient_id: label} -> (train_ids, val_ids), стратификация по классу."""
+    """labels_by_patient: {patient_id: label} -> (train_ids, val_ids), stratified by class."""
     import random as _r
     rng = _r.Random(seed)
     by_cls = {}
@@ -53,7 +53,7 @@ def make_scheduler(optimizer, warmup: int, total: int):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, fn)
 
 
-# --------- синтетический датасет для dry-run ---------
+# --------- synthetic dataset for dry-run ---------
 class _SyntheticDataset(Dataset):
     def __init__(self, n=8, n_phases=4, num_classes=5, spatial=(4, 16, 16)):
         self.n, self.p, self.k, self.s = n, n_phases, num_classes, spatial
@@ -74,24 +74,52 @@ def _collate(batch):
     return collate_multiphase(batch)
 
 
-# --------- основной запуск ---------
+# --------- main entry point ---------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
-    ap.add_argument("--dry-run", action="store_true", help="синтетика + заглушка на CPU")
-    ap.add_argument("--device", default=None, help="переопределить device из конфига")
+    ap.add_argument("--dry-run", action="store_true", help="synthetic data + stub on CPU")
+    ap.add_argument("--device", default=None, help="override device from config")
     ap.add_argument("--epochs", type=int, default=None)
+    ap.add_argument("--batch-size", type=int, default=None, help="override train.batch_size")
+    ap.add_argument("--num-workers", type=int, default=None, help="override train.num_workers")
+    ap.add_argument("--work-dir", default=None, help="override train.work_dir (important for a 2nd run)")
+    ap.add_argument("--amp", action="store_true", help="enable mixed precision (overrides train.amp)")
+    ap.add_argument("--lora", action="store_true", help="enable LoRA on the encoder (overrides segvol.lora.enabled)")
+    ap.add_argument("--seg-prompt", choices=["text", "box"], default=None,
+                    help="segmentation prompt mode (overrides train.seg_prompt)")
+    ap.add_argument("--zoom", type=float, default=None,
+                    help="probability of a zoom-in crop on train [0..1] (overrides train.zoom)")
+    ap.add_argument("--zoom-eval", action="store_true",
+                    help="zoom-in on validation (overrides train.zoom_eval)")
+    ap.add_argument("--normalize", choices=["hu", "foreground"], default=None,
+                    help="input normalization (overrides preprocess.normalize)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    if args.lora:
+        cfg.setdefault("segvol", {}).setdefault("lora", {})["enabled"] = True
+    if args.seg_prompt:
+        cfg["train"]["seg_prompt"] = args.seg_prompt
+    if args.zoom is not None:
+        cfg["train"]["zoom"] = args.zoom
+    if args.zoom_eval:
+        cfg["train"]["zoom_eval"] = True
+    if args.normalize:
+        cfg.setdefault("preprocess", {})["normalize"] = args.normalize
     set_seed(cfg["project"]["seed"])
     device = resolve_device(args.device or cfg.get("device", "auto"))
     num_classes = cfg["classifier"]["num_classes"]
     tcfg = cfg["train"]
     epochs = args.epochs or (2 if args.dry_run else tcfg["num_epochs"])
-    print(f"device={device} | dry_run={args.dry_run} | epochs={epochs}")
+    batch_size = args.batch_size or tcfg["batch_size"]
+    num_workers = args.num_workers if args.num_workers is not None else tcfg.get("num_workers", 0)
+    work_dir = args.work_dir or tcfg["work_dir"]
+    use_amp = (args.amp or tcfg.get("amp", False)) and getattr(device, "type", str(device)) == "cuda"
+    print(f"device={device} | epochs={epochs} | batch_size={batch_size} | "
+          f"num_workers={num_workers} | amp={use_amp} | work_dir={work_dir}")
 
-    # данные
+    # data
     if args.dry_run:
         train_ds = _SyntheticDataset(n=8, n_phases=len(cfg["multiphase"]["phases"]),
                                      num_classes=num_classes)
@@ -109,28 +137,39 @@ def main():
             hu_window=cfg["multiphase"]["hu_window"])
         labels_by_patient = {p["patient_id"]: p["label"] for p in full._patients}
         tr_ids, va_ids = stratified_patient_split(labels_by_patient, seed=cfg["project"]["seed"])
-        train_ds = MultiPhaseLiverDataset(man, class_names=cfg["classifier"]["class_names"],
-                                          phases=cfg["multiphase"]["phases"],
-                                          spatial_size=cfg["segvol"]["spatial_size"],
-                                          hu_window=cfg["multiphase"]["hu_window"],
-                                          patient_ids=tr_ids)
-        val_ds = MultiPhaseLiverDataset(man, class_names=cfg["classifier"]["class_names"],
-                                        phases=cfg["multiphase"]["phases"],
-                                        spatial_size=cfg["segvol"]["spatial_size"],
-                                        hu_window=cfg["multiphase"]["hu_window"],
-                                        patient_ids=va_ids)
+        zoom_margin = tcfg.get("zoom_margin", 0.5)
+        pcfg = cfg.get("preprocess", {})
+        normalize = pcfg.get("normalize", "hu")
+        crop_fg = pcfg.get("crop_foreground", False)
+        common = dict(class_names=cfg["classifier"]["class_names"],
+                      phases=cfg["multiphase"]["phases"],
+                      spatial_size=cfg["segvol"]["spatial_size"],
+                      hu_window=cfg["multiphase"]["hu_window"],
+                      normalize=normalize, crop_foreground=crop_fg)
+        train_ds = MultiPhaseLiverDataset(man, patient_ids=tr_ids,
+                                          augment=tcfg.get("augment", False),
+                                          zoom=tcfg.get("zoom", 0.0), zoom_margin=zoom_margin,
+                                          **common)
+        val_ds = MultiPhaseLiverDataset(man, patient_ids=va_ids,
+                                        zoom=(1.0 if tcfg.get("zoom_eval", False) else 0.0),
+                                        zoom_margin=zoom_margin, **common)
         model = build_segvol_multitask(cfg, device)
+        model._amp_enabled = use_amp    # autocast inside forward (needed for DataParallel)
         if torch.cuda.device_count() > 1:
-            print(f"DataParallel: {torch.cuda.device_count()} GPU")
+            print(f"DataParallel: {torch.cuda.device_count()} GPUs")
             model = torch.nn.DataParallel(model)
         train_labels = [labels_by_patient[p] for p in tr_ids]
 
-    train_loader = DataLoader(train_ds, batch_size=tcfg["batch_size"], shuffle=True,
-                              collate_fn=_collate, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=tcfg["batch_size"], shuffle=False,
-                            collate_fn=_collate, num_workers=0)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                              collate_fn=_collate, num_workers=num_workers,
+                              pin_memory=(getattr(device, "type", str(device)) == "cuda"),
+                              persistent_workers=num_workers > 0)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
+                            collate_fn=_collate, num_workers=num_workers,
+                            pin_memory=(getattr(device, "type", str(device)) == "cuda"),
+                            persistent_workers=num_workers > 0)
 
-    # лосс / оптимизатор
+    # loss / optimizer
     cw = class_weights(train_labels, num_classes).to(device)
     loss_fn = MultiTaskLoss(seg_weight=tcfg["loss_weights"]["seg"],
                             cls_weight=tcfg["loss_weights"]["cls"],
@@ -138,14 +177,31 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=tcfg["lr"],
                                   weight_decay=tcfg["weight_decay"])
     scheduler = make_scheduler(optimizer, tcfg["warmup_epoch"], epochs)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
-    work_dir = tcfg["work_dir"]
     os.makedirs(work_dir, exist_ok=True)
-    best = -1.0
+    unfreeze_epoch = cfg["segvol"].get("unfreeze_epoch", -1)
+    patience = tcfg.get("early_stop_patience", 0)
+    seg_prompt_mode = tcfg.get("seg_prompt", "text")
+    bbox_shift = tcfg.get("bbox_shift", 0)
+    if not args.dry_run:
+        pcfg = cfg.get("preprocess", {})
+        print(f"seg_prompt={seg_prompt_mode}"
+              + (f" (bbox_shift={bbox_shift})" if seg_prompt_mode == "box" else "")
+              + f" | normalize={pcfg.get('normalize', 'hu')} crop_fg={pcfg.get('crop_foreground', False)}"
+              + f" | zoom train_p={tcfg.get('zoom', 0.0)} eval={'on' if tcfg.get('zoom_eval', False) else 'off'}")
+
+    best, best_epoch, no_improve = -1.0, -1, 0
     for epoch in range(epochs):
-        tr = train_one_epoch(model, train_loader, optimizer, loss_fn, device)
+        if not args.dry_run and unfreeze_epoch >= 0 and epoch == unfreeze_epoch:
+            from .build import set_encoder_trainable
+            set_encoder_trainable(model, True)
+            print(f"[epoch {epoch+1}] image_encoder unfrozen -- fine-tuning from here")
+        tr = train_one_epoch(model, train_loader, optimizer, loss_fn, device, scaler=scaler,
+                             seg_prompt_mode=seg_prompt_mode, bbox_shift=bbox_shift)
         scheduler.step()
-        ev = evaluate(model, val_loader, device, num_classes=num_classes)
+        ev = evaluate(model, val_loader, device, num_classes=num_classes,
+                      seg_prompt_mode=seg_prompt_mode)
         print(f"[epoch {epoch+1}/{epochs}] train_loss={tr['loss']:.4f} "
               f"seg={tr['seg_loss']:.4f} cls={tr['cls_loss']:.4f} | "
               f"val_dice={ev.get('dice', float('nan')):.4f} "
@@ -153,11 +209,18 @@ def main():
               f"macroF1={ev.get('macro_f1', float('nan')):.4f}")
         score = ev.get("macro_f1", ev.get("accuracy", 0.0))
         if score is not None and score > best:
-            best = score
+            best, best_epoch, no_improve = score, epoch + 1, 0
             _m = model.module if isinstance(model, torch.nn.DataParallel) else model
             torch.save({"epoch": epoch, "model": _m.state_dict(), "config": cfg},
                        os.path.join(work_dir, "best.pth"))
-    print(f"Готово. Лучший score={best:.4f}. Чекпойнт: {os.path.join(work_dir, 'best.pth')}")
+        else:
+            no_improve += 1
+            if patience and no_improve >= patience:
+                print(f"Early stop: val score did not improve for {patience} epochs "
+                      f"(best at epoch {best_epoch}).")
+                break
+    print(f"Done. Best score={best:.4f} (epoch {best_epoch}). "
+          f"Checkpoint: {os.path.join(work_dir, 'best.pth')}")
 
 
 if __name__ == "__main__":

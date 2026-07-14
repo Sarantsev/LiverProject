@@ -1,4 +1,4 @@
-"""Тест радиомического модуля. Если PyRadiomics не установлен — корректный skip.
+"""Test of the radiomics module. If PyRadiomics is not installed -> clean skip.
 
     ../segvol_env/bin/python tests/test_radiomics.py
 """
@@ -14,7 +14,7 @@ from liver_sppvr.radiomics import RADIOMICS_AVAILABLE, extract_from_arrays
 
 def test_extract_from_arrays():
     if not RADIOMICS_AVAILABLE:
-        print("SKIP test_extract_from_arrays (PyRadiomics не установлен)")
+        print("SKIP test_extract_from_arrays (PyRadiomics not installed)")
         return
     rng = np.random.default_rng(0)
     image = (rng.random((20, 40, 40)) * 200).astype(np.float32)
@@ -23,11 +23,11 @@ def test_extract_from_arrays():
     feats = extract_from_arrays(image, mask, spacing=(1.0, 1.0, 1.0))
     assert len(feats) > 0
     assert all(isinstance(v, float) for v in feats.values())
-    print(f"OK  извлечено {len(feats)} радиомических признаков")
+    print(f"OK  extracted {len(feats)} radiomics features")
 
 
 def test_import_guard():
-    # модуль импортируется даже без PyRadiomics; флаг доступности — булев
+    # the module imports even without PyRadiomics; the availability flag is a bool
     assert isinstance(RADIOMICS_AVAILABLE, bool)
     print(f"OK  RADIOMICS_AVAILABLE={RADIOMICS_AVAILABLE}")
 
@@ -36,4 +36,4 @@ if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
         fn()
-    print("\nТест радиомики завершён.")
+    print("\nRadiomics test finished.")

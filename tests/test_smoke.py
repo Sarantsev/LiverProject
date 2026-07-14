@@ -1,8 +1,8 @@
-"""CPU dry-run: проверяем формы и forward классификационной головы и fusion фаз.
+"""CPU dry-run: check the shapes and forward of the classification head and phase fusion.
 
-Запуск без GPU и без данных (синтетические тензоры):
+Runs without a GPU and without data (synthetic tensors):
     ../segvol_env/bin/python -m pytest tests/test_smoke.py -q
-или просто:
+or simply:
     ../segvol_env/bin/python tests/test_smoke.py
 """
 import os
@@ -17,7 +17,7 @@ from liver_sppvr.utils.device import resolve_device
 
 
 class _StubEncoder(torch.nn.Module):
-    """Заглушка image_encoder SegVol: (B,1,D,H,W) -> (B, N_tokens, C)."""
+    """Stub for the SegVol image_encoder: (B,1,D,H,W) -> (B, N_tokens, C)."""
     def __init__(self, feat=(8, 16, 16), c=768):
         super().__init__()
         self.n = feat[0] * feat[1] * feat[2]
@@ -29,7 +29,7 @@ class _StubEncoder(torch.nn.Module):
         tok = torch.randn(b, self.n, 1, device=x.device)
         return self.proj(tok), None
 
-# Геометрия SegVol: feat = roi/patch = (32,256,256)/(4,16,16) = (8,16,16), C=768
+# SegVol geometry: feat = roi/patch = (32,256,256)/(4,16,16) = (8,16,16), C=768
 B, C, d, h, w = 2, 768, 8, 16, 16
 D, H, W = 32, 256, 256
 N_CLASSES, N_PHASES = 5, 4
@@ -43,7 +43,7 @@ def test_device_resolves():
 def test_cls_head_masked():
     head = TumorClassificationHead(embed_dim=C, num_classes=N_CLASSES, pool="masked")
     emb = torch.randn(B, C, d, h, w)
-    mask = (torch.rand(B, 1, D, H, W) > 0.7).float()       # маска в полном разрешении
+    mask = (torch.rand(B, 1, D, H, W) > 0.7).float()       # full-resolution mask
     logits = head(emb, mask=mask)
     assert logits.shape == (B, N_CLASSES)
 
@@ -51,13 +51,13 @@ def test_cls_head_masked():
 def test_cls_head_empty_mask_fallback():
     head = TumorClassificationHead(embed_dim=C, num_classes=N_CLASSES, pool="masked")
     emb = torch.randn(B, C, d, h, w)
-    mask = torch.zeros(B, 1, D, H, W)                       # пустая маска -> fallback на GAP
+    mask = torch.zeros(B, 1, D, H, W)                       # empty mask -> GAP fallback
     logits = head(emb, mask=mask)
     assert torch.isfinite(logits).all()
 
 
 def test_cls_head_hybrid_radiomics():
-    extra = 32                                             # размер радиомического вектора
+    extra = 32                                             # radiomics vector size
     head = TumorClassificationHead(embed_dim=C, num_classes=N_CLASSES,
                                    pool="gap", extra_feat_dim=extra)
     emb = torch.randn(B, C, d, h, w)
@@ -68,7 +68,7 @@ def test_cls_head_hybrid_radiomics():
 
 def test_phase_fusion_concat_stem():
     fusion = PhaseFusion(mode="concat_stem", n_phases=N_PHASES)
-    phases = torch.randn(B, N_PHASES, 8, 64, 64)           # уменьшенный объём для скорости
+    phases = torch.randn(B, N_PHASES, 8, 64, 64)           # smaller volume for speed
     fused = fusion.fuse_input(phases)
     assert fused.shape == (B, 1, 8, 64, 64)
 
@@ -116,4 +116,4 @@ if __name__ == "__main__":
     for fn in fns:
         fn()
         print(f"OK  {fn.__name__}")
-    print("\nВсе smoke-тесты прошли.")
+    print("\nAll smoke tests passed.")

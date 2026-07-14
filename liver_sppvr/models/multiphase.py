@@ -1,19 +1,19 @@
-"""Fusion мультифазного КТ (новизна).
+"""Multi-phase CT fusion (project-specific addition).
 
-SegVol нативно принимает одноканальный объём (одна фаза). Мы добавляем fusion
-4 фаз (нативная / артериальная / портальная / отсроченная), т.к. динамика
-контраста — радиологическая основа различения HCC / ICC / метастазов.
+SegVol natively takes a single-channel volume (one phase). We add fusion of the
+4 phases (non-contrast / arterial / portal / delayed), since contrast dynamics are
+the radiological basis for distinguishing HCC / ICC / metastases.
 
-Поддерживаются два режима:
+Two modes are supported:
 
-1. "concat_stem" — ранний fusion на уровне вокселей: фазы как каналы пропускаются
-   через небольшой 3D-conv stem и сворачиваются в 1 канал, который подаётся в
-   неизменённый image_encoder SegVol. Самый дешёвый вариант, SegVol не трогаем.
+1. "concat_stem" -- early voxel-level fusion: the phases (as channels) pass through
+   a small 3D-conv stem and are collapsed into 1 channel, which is fed to the
+   unchanged SegVol image_encoder. Cheapest option, SegVol left untouched.
 
-2. "attention" — fusion на уровне признаков: каждая фаза кодируется отдельно
-   (энкодер вызывается снаружи), а здесь эмбеддинги фаз агрегируются обучаемым
-   attention-пулингом по оси фаз. Дороже, но сохраняет фазовую информацию в
-   признаках -> сильнее для классификации.
+2. "attention" -- feature-level fusion: each phase is encoded separately (the encoder
+   is called outside this module), and here the phase embeddings are aggregated by a
+   learned attention pooling over the phase axis. More expensive, but keeps the
+   per-phase information in the features -> stronger for classification.
 """
 from __future__ import annotations
 
@@ -44,29 +44,29 @@ class PhaseFusion(nn.Module):
                 nn.GELU(),
                 nn.Conv3d(8, 1, kernel_size=1),
             )
-        else:  # attention: скоринг фаз по эмбеддингу
+        else:  # attention: score phases from their embeddings
             self.score = nn.Sequential(
                 nn.Linear(embed_dim, embed_dim // 4),
                 nn.GELU(),
                 nn.Linear(embed_dim // 4, 1),
             )
 
-    # --- режим concat_stem ---
+    # --- concat_stem mode ---
     def fuse_input(self, phases: torch.Tensor) -> torch.Tensor:
-        """phases: (B, n_phases, D, H, W) -> (B, 1, D, H, W) для подачи в SegVol."""
+        """phases: (B, n_phases, D, H, W) -> (B, 1, D, H, W) to feed into SegVol."""
         if self.mode != "concat_stem":
-            raise RuntimeError("fuse_input доступен только в режиме 'concat_stem'.")
+            raise RuntimeError("fuse_input is only available in 'concat_stem' mode.")
         return self.stem(phases)
 
-    # --- режим attention ---
+    # --- attention mode ---
     def fuse_embeddings(self, phase_embeddings: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """phase_embeddings: (B, P, C, d, h, w) -> fused (B, C, d, h, w).
 
-        Внимание считается по глобально-усреднённому эмбеддингу каждой фазы;
-        возвращаются также веса фаз (B, P) для интерпретируемости.
+        Attention is computed from each phase's globally-averaged embedding;
+        the phase weights (B, P) are also returned for interpretability.
         """
         if self.mode != "attention":
-            raise RuntimeError("fuse_embeddings доступен только в режиме 'attention'.")
+            raise RuntimeError("fuse_embeddings is only available in 'attention' mode.")
         b, p, c, d, h, w = phase_embeddings.shape
         gap = phase_embeddings.flatten(3).mean(-1)        # (B, P, C)
         scores = self.score(gap).squeeze(-1)              # (B, P)

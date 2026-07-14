@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-import glob
 import os
 from typing import Callable, List, Optional, Sequence
 
 MANIFEST_COLUMNS = [
-    "patient_id",   # уникальный id пациента (сплит делается по нему — без утечки)
-    "dataset",      # имя датасета-источника
-    "tumor_type",   # метка класса (HCC/ICC/CRLM/BCLM/HH/...)
-    "phase",        # фаза КТ (non_contrast/arterial/portal/delayed)
-    "image_path",   # путь к NIfTI изображения данной фазы
-    "mask_path",    # путь к NIfTI маски опухоли (общая для пациента)
+    "patient_id",   # unique patient id (the split is done on it -- no leakage)
+    "dataset",      # source dataset name
+    "tumor_type",   # class label (HCC/ICC/CRLM/BCLM/HH/...)
+    "phase",        # CT phase (non_contrast/arterial/portal/delayed)
+    "image_path",   # path to the NIfTI image of this phase
+    "mask_path",    # path to the tumor mask NIfTI (shared per patient)
 ]
 
 
@@ -21,7 +20,7 @@ def scan_by_dir(
     mask_name: str = "mask.nii.gz",
     image_ext: str = ".nii.gz",
 ) -> List[dict]:
-    """Сканер типовой раскладки root/<tumor_type>/<patient_id>/<phase>.nii.gz."""
+    """Scanner for the standard layout root/<tumor_type>/<patient_id>/<phase>.nii.gz."""
     records: List[dict] = []
     for tumor_type in sorted(os.listdir(root)):
         type_dir = os.path.join(root, tumor_type)
@@ -53,16 +52,16 @@ def build_manifest(
     record_fn: Optional[Callable[[str], List[dict]]] = None,
     **scan_kwargs,
 ) -> "pandas.DataFrame":
-    """Собрать манифест и записать в CSV.
+    """Build the manifest and write it to CSV.
 
-    record_fn: кастомный адаптер раскладки; если None — используется scan_by_dir.
+    record_fn: custom layout adapter; if None, scan_by_dir is used.
     """
     import pandas as pd
     if record_fn is not None:
         records = record_fn(root)
     else:
         if root is None:
-            raise ValueError("Нужен root или record_fn.")
+            raise ValueError("root or record_fn is required.")
         records = scan_by_dir(root, dataset=dataset, **scan_kwargs)
     df = pd.DataFrame(records, columns=MANIFEST_COLUMNS)
     os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
@@ -80,6 +79,6 @@ def load_manifest(csv_path: str) -> "pandas.DataFrame":
 def validate_manifest(df) -> None:
     missing = [c for c in MANIFEST_COLUMNS if c not in df.columns]
     if missing:
-        raise ValueError(f"В манифесте нет колонок: {missing}")
+        raise ValueError(f"Manifest is missing columns: {missing}")
     if df.empty:
-        raise ValueError("Манифест пуст.")
+        raise ValueError("Manifest is empty.")

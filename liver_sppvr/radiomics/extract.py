@@ -15,8 +15,8 @@ except Exception:
 def _require():
     if not RADIOMICS_AVAILABLE:
         raise ImportError(
-            "PyRadiomics не установлен. Установите: pip install pyradiomics "
-            "(см. requirements.txt). На рабочем GPU-девайсе он должен быть в окружении.")
+            "PyRadiomics is not installed. Install it: pip install pyradiomics "
+            "(see requirements.txt). It should be present in the GPU box environment.")
 
 
 def _get_extractor(params: Optional[str]):
@@ -29,7 +29,7 @@ def _get_extractor(params: Optional[str]):
 
 
 def _filter_features(result: dict) -> dict:
-    """Убрать диагностические поля (diagnostics_*), оставить только числовые признаки."""
+    """Drop diagnostic fields (diagnostics_*), keep only numeric features."""
     out = {}
     for k, v in result.items():
         if k.startswith("diagnostics_"):
@@ -42,7 +42,7 @@ def _filter_features(result: dict) -> dict:
 
 
 def extract_features(image_path: str, mask_path: str, params: Optional[str] = None) -> dict:
-    """Извлечь признаки из NIfTI изображения и маски. Возвращает {feature_name: value}."""
+    """Extract features from a NIfTI image and mask. Returns {feature_name: value}."""
     extractor = _get_extractor(params)
     result = extractor.execute(str(image_path), str(mask_path))
     return _filter_features(result)
@@ -54,7 +54,7 @@ def extract_from_arrays(
     spacing: Sequence[float] = (1.0, 1.0, 1.0),
     params: Optional[str] = None,
 ) -> dict:
-    """Извлечь признаки из numpy-массивов (image, mask) с заданным spacing."""
+    """Extract features from numpy arrays (image, mask) with the given spacing."""
     import SimpleITK as sitk
     extractor = _get_extractor(params)
     img = sitk.GetImageFromArray(image.astype(np.float32))
@@ -70,10 +70,10 @@ def batch_extract(
     params: Optional[str] = None,
     phase: str = "portal",
 ):
-    """Пройти по манифесту и собрать признаки по одной фазе на пациента.
+    """Walk the manifest and collect features from a single phase per patient.
 
-    Возвращает pandas.DataFrame: индекс patient_id, колонки — радиомические признаки
-    + tumor_type/label. Удобно как вход для бустинга или для слияния с deep-фичами.
+    Returns a pandas.DataFrame indexed by patient_id, with radiomics feature columns
+    + tumor_type/label. Convenient as input for boosting or for fusion with deep features.
     """
     import pandas as pd
     rows, index = [], []
