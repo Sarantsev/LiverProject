@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Training artifacts / checkpoints
+work_dir/
+*.pth
+*.ckpt
+
+# Data (NIfTI / archives / manifests)
+data/
+*.nii
+*.nii.gz
+*.tar
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

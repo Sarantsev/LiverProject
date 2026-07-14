@@ -24,6 +24,9 @@ multiphase:
   phases: [non_contrast, arterial, portal, delayed]   # 4 CT phases
   fusion: attention                 # concat_stem | attention
   hu_window: [-175, 250]            # HU window -> [0,1] (used only when normalize=hu)
+  seg_phase: portal                 # hybrid: single phase for SEGMENTATION (on-distribution for
+                                    # SegVol; mask lives on it). Classification always uses all
+                                    # phases. null/empty -> segmentation uses the fused embedding
 
 # --- Preprocessing ---
 preprocess:
