@@ -90,7 +90,7 @@ class MultiPhaseLiverDataset(Dataset):
         mask = load_mask(rec["mask_path"], self.spatial_size, frac_box=frac_box)  # (1,D,H,W)
         if self.augment:
             from .augment import augment_multiphase
-            phases, mask = augment_multiphase(phases, mask)
+            phases, mask = augment_multiphase(phases, mask, clip01=(self.normalize == "hu"))
         return dict(
             phases=phases,
             mask=mask,
