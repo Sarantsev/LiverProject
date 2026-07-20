@@ -52,7 +52,8 @@ def build_segvol_multitask(cfg: dict, device) -> SegVolMultiTask:
         roi_size=tuple(sv["spatial_size"]), patch_size=tuple(sv["patch_size"]),
         embed_dim=sv["embed_dim"], num_classes=cls["num_classes"],
         cls_hidden_dim=cls["hidden_dim"], cls_dropout=cls["dropout"],
-        cls_pool=cls["pool"], fusion_mode=mp["fusion"], n_phases=len(mp["phases"]),
+        cls_pool=cls["pool"], cls_extra_feat_dim=cls.get("extra_feat_dim", 0),
+        fusion_mode=mp["fusion"], n_phases=len(mp["phases"]),
         seg_phase_idx=seg_phase_idx,
     )
     if seg_phase_idx is not None:
@@ -62,11 +63,13 @@ def build_segvol_multitask(cfg: dict, device) -> SegVolMultiTask:
     if lora_cfg.get("enabled", False):
         from ..models.lora import apply_lora
         set_encoder_trainable(model, False)               # encoder base frozen
+        variant = lora_cfg.get("variant", "lora")
         n = apply_lora(model.image_encoder, targets=lora_cfg.get("targets", ["qkv"]),
                        rank=lora_cfg.get("rank", 8), alpha=lora_cfg.get("alpha", 16.0),
-                       dropout=lora_cfg.get("dropout", 0.0))
+                       dropout=lora_cfg.get("dropout", 0.0), variant=variant)
         n_train = sum(p.numel() for p in model.image_encoder.parameters() if p.requires_grad)
-        print(f"LoRA: wrapped {n} encoder Linear layers, trainable in encoder {n_train/1e6:.3f}M")
+        print(f"{variant.upper()}: wrapped {n} encoder Linear layers, "
+              f"trainable in encoder {n_train/1e6:.3f}M")
     elif sv.get("freeze_encoder", False):
         set_encoder_trainable(model, False)
         n_frozen = sum(p.numel() for p in model.image_encoder.parameters())

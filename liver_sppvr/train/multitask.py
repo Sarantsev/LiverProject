@@ -38,6 +38,26 @@ def stratified_patient_split(labels_by_patient: dict, val_frac: float = 0.2, see
     return train, val
 
 
+def load_radiomics(csv_path: str, train_ids):
+    """Load per-patient radiomics CSV -> {patient_id: np.float32 vector}, or None if disabled.
+
+    Features are z-scored using TRAIN patients only (no leakage); NaNs -> 0.
+    CSV columns: patient_id, <feature columns...>, [tumor_type] (built by
+    scripts/extract_radiomics.py).
+    """
+    if not csv_path or not os.path.exists(csv_path):
+        return None
+    import numpy as np
+    import pandas as pd
+    df = pd.read_csv(csv_path).set_index("patient_id")
+    feat_cols = [c for c in df.columns if c != "tumor_type"]
+    train_rows = df.loc[df.index.intersection(list(train_ids)), feat_cols]
+    mu = train_rows.mean()
+    sd = train_rows.std().replace(0, 1.0)
+    norm = ((df[feat_cols] - mu) / sd).fillna(0.0)
+    return {pid: norm.loc[pid].to_numpy(dtype="float32") for pid in norm.index}
+
+
 def class_weights(labels, num_classes: int) -> torch.Tensor:
     cnt = Counter(labels)
     w = torch.tensor([1.0 / max(cnt.get(c, 0), 1) for c in range(num_classes)])
@@ -85,7 +105,9 @@ def main():
     ap.add_argument("--num-workers", type=int, default=None, help="override train.num_workers")
     ap.add_argument("--work-dir", default=None, help="override train.work_dir (important for a 2nd run)")
     ap.add_argument("--amp", action="store_true", help="enable mixed precision (overrides train.amp)")
-    ap.add_argument("--lora", action="store_true", help="enable LoRA on the encoder (overrides segvol.lora.enabled)")
+    ap.add_argument("--lora", action="store_true", help="enable PEFT on the encoder (overrides segvol.lora.enabled)")
+    ap.add_argument("--lora-variant", choices=["lora", "dora"], default=None,
+                    help="PEFT variant (overrides segvol.lora.variant)")
     ap.add_argument("--seg-prompt", choices=["text", "box"], default=None,
                     help="segmentation prompt mode (overrides train.seg_prompt)")
     ap.add_argument("--zoom", type=float, default=None,
@@ -97,11 +119,16 @@ def main():
     ap.add_argument("--seg-phase", default=None,
                     help="hybrid: phase name for segmentation (e.g. portal); 'all' = fused embedding "
                          "(overrides multiphase.seg_phase)")
+    ap.add_argument("--radiomics-csv", default=None,
+                    help="path to per-patient radiomics CSV to fuse into the classifier "
+                         "(overrides data.radiomics_csv)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     if args.lora:
         cfg.setdefault("segvol", {}).setdefault("lora", {})["enabled"] = True
+    if args.lora_variant:
+        cfg.setdefault("segvol", {}).setdefault("lora", {})["variant"] = args.lora_variant
     if args.seg_prompt:
         cfg["train"]["seg_prompt"] = args.seg_prompt
     if args.zoom is not None:
@@ -112,6 +139,8 @@ def main():
         cfg.setdefault("preprocess", {})["normalize"] = args.normalize
     if args.seg_phase:
         cfg["multiphase"]["seg_phase"] = None if args.seg_phase == "all" else args.seg_phase
+    if args.radiomics_csv is not None:
+        cfg.setdefault("data", {})["radiomics_csv"] = args.radiomics_csv
     set_seed(cfg["project"]["seed"])
     device = resolve_device(args.device or cfg.get("device", "auto"))
     num_classes = cfg["classifier"]["num_classes"]
@@ -146,11 +175,17 @@ def main():
         pcfg = cfg.get("preprocess", {})
         normalize = pcfg.get("normalize", "hu")
         crop_fg = pcfg.get("crop_foreground", False)
+        # optional radiomics fusion: standardize per-patient features on TRAIN only (no leakage)
+        radiomics = load_radiomics(cfg.get("data", {}).get("radiomics_csv", ""), tr_ids)
+        if radiomics is not None:
+            dim = len(next(iter(radiomics.values())))
+            cfg["classifier"]["extra_feat_dim"] = dim
+            print(f"radiomics fusion: {dim} features per patient")
         common = dict(class_names=cfg["classifier"]["class_names"],
                       phases=cfg["multiphase"]["phases"],
                       spatial_size=cfg["segvol"]["spatial_size"],
                       hu_window=cfg["multiphase"]["hu_window"],
-                      normalize=normalize, crop_foreground=crop_fg)
+                      normalize=normalize, crop_foreground=crop_fg, radiomics=radiomics)
         train_ds = MultiPhaseLiverDataset(man, patient_ids=tr_ids,
                                           augment=tcfg.get("augment", False),
                                           zoom=tcfg.get("zoom", 0.0), zoom_margin=zoom_margin,
@@ -209,10 +244,15 @@ def main():
                       seg_prompt_mode=seg_prompt_mode)
         print(f"[epoch {epoch+1}/{epochs}] train_loss={tr['loss']:.4f} "
               f"seg={tr['seg_loss']:.4f} cls={tr['cls_loss']:.4f} | "
-              f"val_dice={ev.get('dice', float('nan')):.4f} "
+              f"val_dice={ev.get('dice', float('nan')):.4f} | "
               f"acc={ev.get('accuracy', float('nan')):.4f} "
-              f"macroF1={ev.get('macro_f1', float('nan')):.4f}")
-        score = ev.get("macro_f1", ev.get("accuracy", 0.0))
+              f"bal_acc={ev.get('balanced_accuracy', float('nan')):.4f} "
+              f"macroF1={ev.get('macro_f1', float('nan')):.4f} "
+              f"AUC={ev.get('auc', float('nan')):.4f}")
+        # select checkpoint by AUC (metric used in the literature); fall back to macro-F1
+        score = ev.get("auc")
+        if score is None or score != score:   # None or NaN
+            score = ev.get("macro_f1", ev.get("accuracy", 0.0))
         if score is not None and score > best:
             best, best_epoch, no_improve = score, epoch + 1, 0
             _m = model.module if isinstance(model, torch.nn.DataParallel) else model

@@ -77,6 +77,7 @@ def train_one_epoch(model, loader, optimizer, loss_fn, device, *,
         optimizer.zero_grad()
         with torch.cuda.amp.autocast(enabled=use_amp):
             out = model(phases=batch["phases"], cls_mask=batch["mask"],
+                        cls_extra_feat=batch.get("radiomics"),
                         return_seg=True, return_cls=True, **seg_kw)
             losses = loss_fn(out, {"mask": batch["mask"], "label": batch["label"]})
         if use_amp:
@@ -104,26 +105,37 @@ def train_one_epoch(model, loader, optimizer, loss_fn, device, *,
 def evaluate(model, loader, device, *, num_classes: int, seg_text: str = "liver tumor",
              seg_prompt_mode: str = "text") -> dict:
     model.eval()
-    dices, y_true, y_pred = [], [], []
+    dices, y_true, y_pred, y_prob = [], [], [], []
     for batch in loader:
         batch = _batch_to_device(batch, device)
         seg_kw = _seg_prompt_kwargs(batch, seg_prompt_mode, seg_text, bbox_shift=0)  # no jitter on eval
         out = model(phases=batch["phases"], cls_mask=batch["mask"],
+                    cls_extra_feat=batch.get("radiomics"),
                     return_seg=True, return_cls=True, **seg_kw)
         if out.get("seg_logits") is not None:
             dices.append(_dice_score(out["seg_logits"], batch["mask"]))
         if out.get("cls_logits") is not None:
-            y_pred.extend(out["cls_logits"].argmax(1).cpu().tolist())
+            probs = torch.softmax(out["cls_logits"].float(), dim=1)
+            y_prob.extend(probs.cpu().tolist())
+            y_pred.extend(probs.argmax(1).cpu().tolist())
             y_true.extend(batch["label"].cpu().tolist())
 
     metrics = {"dice": float(np.mean(dices)) if dices else float("nan")}
     if y_true:
+        # metrics reported like the liver-tumor classification literature: accuracy + AUC
+        # (macro one-vs-rest), plus balanced accuracy and macro-F1.
         metrics["accuracy"] = float(np.mean(np.array(y_true) == np.array(y_pred)))
         try:
-            from sklearn.metrics import f1_score
-            metrics["macro_f1"] = float(
-                f1_score(y_true, y_pred, average="macro",
-                         labels=list(range(num_classes)), zero_division=0))
+            from sklearn.metrics import f1_score, balanced_accuracy_score, roc_auc_score
+            labels = list(range(num_classes))
+            metrics["macro_f1"] = float(f1_score(y_true, y_pred, average="macro",
+                                                 labels=labels, zero_division=0))
+            metrics["balanced_accuracy"] = float(balanced_accuracy_score(y_true, y_pred))
+            try:
+                metrics["auc"] = float(roc_auc_score(
+                    y_true, np.array(y_prob), multi_class="ovr", average="macro", labels=labels))
+            except Exception:
+                metrics["auc"] = float("nan")   # a class may be absent in a small val fold
         except Exception:
             pass
     return metrics
