@@ -12,12 +12,15 @@ segvol:
   embed_dim: 768                    # ViT embedding size (feat_shape = roi/patch = 8x16x16)
   freeze_encoder: true              # freeze the SegVol ViT encoder -> main anti-overfit lever
   unfreeze_epoch: -1                # -1 = never unfreeze; N = unfreeze the encoder from epoch N
-  lora:                             # LoRA on the encoder instead of a full freeze (takes priority over freeze_encoder)
-    enabled: false                  # true -> encoder base frozen + trainable low-rank A/B
-    rank: 8
-    alpha: 16
+  lora:                             # PEFT on the encoder instead of a full freeze (takes priority over freeze_encoder)
+    enabled: false                  # true -> encoder base frozen + trainable low-rank adapters
+    variant: dora                   # lora | dora  (DoRA: weight-decomposed LoRA, usually stronger)
+    rank: 16                        # more capacity than 8 -> more encoder adaptation for classification
+    alpha: 32                       # keep alpha = 2*rank
     dropout: 0.05
-    targets: [qkv]                  # substrings of encoder Linear layer names to wrap with LoRA
+    targets: [qkv, out_proj, linear1, linear2]  # attention (qkv+out_proj) + MLP (linear1/2);
+                                    # use [all] to wrap every Linear (max adaptation). Check the
+                                    # "DORA: wrapped N ..." log line -- N should rise from 12 to ~48
 
 # --- Multi-phase ---
 multiphase:
@@ -40,10 +43,13 @@ classifier:
   hidden_dim: 256
   dropout: 0.3
   pool: masked                      # masked | gap  (masked -> pool over the tumor mask)
+  extra_feat_dim: 0                 # auto-set from radiomics_csv; 0 = deep features only
 
 # --- Data ---
 data:
   manifest: "data/manifest.csv"     # image_path, mask_path, tumor_type, dataset, phase, patient_id
+  radiomics_csv: ""                 # optional: CSV of per-patient radiomics -> fuse into classifier
+                                    # (build with scripts/extract_radiomics.py). "" = disabled
 
 # --- Training (multi-task: seg + cls) ---
 train:

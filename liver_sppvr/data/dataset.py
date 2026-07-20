@@ -23,8 +23,11 @@ class MultiPhaseLiverDataset(Dataset):
         zoom_margin: float = 0.5,                      # context margin around the tumor (fraction of extent)
         normalize: str = "hu",                         # 'foreground' (SegVol) | 'hu'
         crop_foreground: bool = False,                 # crop the body before resize (SegVol-style)
+        radiomics: Optional[dict] = None,              # {patient_id: np.float32 vector} for fusion
     ):
         self.class_names = list(class_names)
+        self.radiomics = radiomics
+        self.radiomics_dim = len(next(iter(radiomics.values()))) if radiomics else 0
         self.class_to_idx = {c: i for i, c in enumerate(self.class_names)}
         self.phases = list(phases)
         self.spatial_size = tuple(spatial_size)
@@ -91,20 +94,28 @@ class MultiPhaseLiverDataset(Dataset):
         if self.augment:
             from .augment import augment_multiphase
             phases, mask = augment_multiphase(phases, mask, clip01=(self.normalize == "hu"))
-        return dict(
+        item = dict(
             phases=phases,
             mask=mask,
             label=torch.tensor(rec["label"], dtype=torch.long),
             phase_present=torch.tensor(phase_present),
             patient_id=rec["patient_id"],
         )
+        if self.radiomics is not None:
+            vec = self.radiomics.get(rec["patient_id"])
+            item["radiomics"] = (torch.from_numpy(vec).float() if vec is not None
+                                 else torch.zeros(self.radiomics_dim))
+        return item
 
 
 def collate_multiphase(batch: List[dict]) -> dict:
-    return dict(
+    out = dict(
         phases=torch.stack([b["phases"] for b in batch], dim=0),       # (B,P,1,D,H,W)
         mask=torch.stack([b["mask"] for b in batch], dim=0),           # (B,1,D,H,W)
         label=torch.stack([b["label"] for b in batch], dim=0),         # (B,)
         phase_present=torch.stack([b["phase_present"] for b in batch], dim=0),
         patient_id=[b["patient_id"] for b in batch],
     )
+    if "radiomics" in batch[0]:
+        out["radiomics"] = torch.stack([b["radiomics"] for b in batch], dim=0)  # (B,F)
+    return out

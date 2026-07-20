@@ -16,7 +16,6 @@ work_dir/
 *.ckpt
 
 # Data (NIfTI / archives / manifests)
-data/
 *.nii
 *.nii.gz
 *.tar
