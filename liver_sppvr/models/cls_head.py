@@ -40,8 +40,9 @@ class TumorClassificationHead(nn.Module):
         """
         b, c, d, h, w = embedding.shape
         if mask.shape[2:] != (d, h, w):
-            mask = F.interpolate(mask.float(), size=(d, h, w), mode="trilinear",
-                                 align_corners=False)
+            # max-pool to the embedding grid: a cell is "tumor" if ANY fine voxel in it is.
+            # (trilinear + threshold would drop small tumors -> silent GAP fallback.)
+            mask = F.adaptive_max_pool3d(mask.float(), (d, h, w))
         mask = (mask > 0.5).float()                      # (B,1,d,h,w)
         denom = mask.flatten(2).sum(-1).clamp_min(1.0)   # (B,1) -- guard against empty mask
         pooled = (embedding * mask).flatten(2).sum(-1) / denom  # (B,C)
