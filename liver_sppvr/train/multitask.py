@@ -59,6 +59,23 @@ def load_radiomics(csv_path: str, train_ids):
     return {pid: norm.loc[pid].to_numpy(dtype="float32") for pid in norm.index}
 
 
+def fit_radiomics_classifier(radiomics: dict, train_ids, labels_by_patient, kind: str = "rf"):
+    """Fit a RandomForest/SVM on train patients' (standardized) radiomics -> for late fusion."""
+    import numpy as np
+    ids = [p for p in train_ids if p in radiomics]
+    X = np.stack([radiomics[p] for p in ids])
+    y = np.array([labels_by_patient[p] for p in ids])
+    if kind == "svm":
+        from sklearn.svm import SVC
+        clf = SVC(probability=True, class_weight="balanced", random_state=0)
+    else:
+        from sklearn.ensemble import RandomForestClassifier
+        clf = RandomForestClassifier(n_estimators=400, class_weight="balanced",
+                                     n_jobs=-1, random_state=0)
+    clf.fit(X, y)
+    return clf
+
+
 def class_weights(labels, num_classes: int) -> torch.Tensor:
     cnt = Counter(labels)
     w = torch.tensor([1.0 / max(cnt.get(c, 0), 1) for c in range(num_classes)])
@@ -112,9 +129,23 @@ def _collate(batch):
     return collate_multiphase(batch)
 
 
+def _print_per_class(ev: dict, class_names) -> None:
+    """Print per-class sensitivity/specificity/F1/AUC + Cohen's kappa (benchmark protocol)."""
+    if "per_f1" not in ev:
+        return
+    n = len(ev["per_f1"])
+    names = list(class_names) if class_names else [f"c{i}" for i in range(n)]
+    print("  per-class:  " + f"{'class':<8} {'sens':>6} {'spec':>6} {'F1':>6} {'AUC':>6}")
+    for i in range(n):
+        print(f"    {names[i]:<8} "
+              f"{ev['per_sens'][i]:>6.3f} {ev['per_spec'][i]:>6.3f} "
+              f"{ev['per_f1'][i]:>6.3f} {ev['per_auc'][i]:>6.3f}")
+    print(f"  Cohen's kappa = {ev.get('kappa', float('nan')):.4f}")
+
+
 # --------- shared training loop (one split) ---------
 def _train_loop(cfg, args, device, model, train_ds, val_ds, train_labels, work_dir, *,
-                epochs, batch_size, num_workers, use_amp, num_classes) -> dict:
+                epochs, batch_size, num_workers, use_amp, num_classes, rf=None, rf_alpha=0.5) -> dict:
     """Train on one split; save best.pth to work_dir; return the best-epoch metrics."""
     tcfg = cfg["train"]
     pin = getattr(device, "type", str(device)) == "cuda"
@@ -150,14 +181,15 @@ def _train_loop(cfg, args, device, model, train_ds, val_ds, train_labels, work_d
                              seg_prompt_mode=seg_prompt_mode, bbox_shift=bbox_shift)
         scheduler.step()
         ev = evaluate(model, val_loader, device, num_classes=num_classes,
-                      seg_prompt_mode=seg_prompt_mode)
+                      seg_prompt_mode=seg_prompt_mode, rf=rf, rf_alpha=rf_alpha)
         print(f"[epoch {epoch+1}/{epochs}] train_loss={tr['loss']:.4f} "
               f"seg={tr['seg_loss']:.4f} cls={tr['cls_loss']:.4f} | "
               f"val_dice={ev.get('dice', float('nan')):.4f} | "
               f"acc={ev.get('accuracy', float('nan')):.4f} "
               f"bal_acc={ev.get('balanced_accuracy', float('nan')):.4f} "
               f"macroF1={ev.get('macro_f1', float('nan')):.4f} "
-              f"AUC={ev.get('auc', float('nan')):.4f}")
+              f"AUC={ev.get('auc', float('nan')):.4f} "
+              f"kappa={ev.get('kappa', float('nan')):.4f}")
         # select checkpoint by AUC (metric used in the literature); fall back to macro-F1
         score = ev.get("auc")
         if score is None or score != score:   # None or NaN
@@ -175,6 +207,11 @@ def _train_loop(cfg, args, device, model, train_ds, val_ds, train_labels, work_d
                 break
     print(f"Done. Best score={best:.4f} (epoch {best_epoch}). "
           f"Checkpoint: {os.path.join(work_dir, 'best.pth')}")
+    print(f"  best epoch metrics: acc={best_ev.get('accuracy', float('nan')):.4f} "
+          f"bal_acc={best_ev.get('balanced_accuracy', float('nan')):.4f} "
+          f"macroF1={best_ev.get('macro_f1', float('nan')):.4f} "
+          f"AUC={best_ev.get('auc', float('nan')):.4f}")
+    _print_per_class(best_ev, cfg["classifier"].get("class_names"))
     return {"score": best, "epoch": best_epoch, **best_ev}
 
 
@@ -186,9 +223,20 @@ def _build_and_train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_pati
     pcfg = cfg.get("preprocess", {})
     zoom_margin = tcfg.get("zoom_margin", 0.5)
     # optional radiomics fusion: standardize per-patient features on TRAIN only (no leakage)
-    radiomics = load_radiomics(cfg.get("data", {}).get("radiomics_csv", ""), tr_ids)
+    dcfg = cfg.get("data", {})
+    radiomics = load_radiomics(dcfg.get("radiomics_csv", ""), tr_ids)
+    rf, rf_alpha = None, float(dcfg.get("radiomics_alpha", 0.5))
     if radiomics is not None:
-        cfg["classifier"]["extra_feat_dim"] = len(next(iter(radiomics.values())))
+        fusion = dcfg.get("radiomics_fusion", "early")
+        if fusion == "late":
+            cfg["classifier"]["extra_feat_dim"] = 0       # deep uses images only
+            rf = fit_radiomics_classifier(radiomics, tr_ids, labels_by_patient,
+                                          kind=dcfg.get("radiomics_clf", "rf"))
+            print(f"radiomics LATE fusion: {dcfg.get('radiomics_clf', 'rf').upper()} "
+                  f"blended, alpha={rf_alpha}")
+        else:  # early
+            cfg["classifier"]["extra_feat_dim"] = len(next(iter(radiomics.values())))
+            print(f"radiomics EARLY fusion: {len(next(iter(radiomics.values())))} features")
     common = dict(class_names=cfg["classifier"]["class_names"],
                   phases=cfg["multiphase"]["phases"],
                   spatial_size=cfg["segvol"]["spatial_size"],
@@ -208,7 +256,7 @@ def _build_and_train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_pati
     train_labels = [labels_by_patient[p] for p in tr_ids]
     result = _train_loop(cfg, args, device, model, train_ds, val_ds, train_labels, work_dir,
                          epochs=epochs, batch_size=batch_size, num_workers=num_workers,
-                         use_amp=use_amp, num_classes=num_classes)
+                         use_amp=use_amp, num_classes=num_classes, rf=rf, rf_alpha=rf_alpha)
     # free this fold's model + cached GPU memory before the next fold (avoid OOM accumulation).
     # PyTorch models hold reference cycles, so an explicit gc.collect() is needed to release them.
     del model, train_ds, val_ds
@@ -246,6 +294,10 @@ def main():
     ap.add_argument("--radiomics-csv", default=None,
                     help="path to per-patient radiomics CSV to fuse into the classifier "
                          "(overrides data.radiomics_csv)")
+    ap.add_argument("--radiomics-fusion", choices=["early", "late"], default=None,
+                    help="how radiomics enters the classifier (overrides data.radiomics_fusion)")
+    ap.add_argument("--fusion", choices=["attention", "cross_attention", "concat_stem"], default=None,
+                    help="multi-phase fusion mode (overrides multiphase.fusion)")
     ap.add_argument("--kfold", type=int, default=1,
                     help="stratified k-fold cross-validation (1 = single split)")
     ap.add_argument("--fold", type=int, default=None,
@@ -269,6 +321,10 @@ def main():
         cfg["multiphase"]["seg_phase"] = None if args.seg_phase == "all" else args.seg_phase
     if args.radiomics_csv is not None:
         cfg.setdefault("data", {})["radiomics_csv"] = args.radiomics_csv
+    if args.fusion:
+        cfg["multiphase"]["fusion"] = args.fusion
+    if args.radiomics_fusion:
+        cfg.setdefault("data", {})["radiomics_fusion"] = args.radiomics_fusion
     set_seed(cfg["project"]["seed"])
     device = resolve_device(args.device or cfg.get("device", "auto"))
     num_classes = cfg["classifier"]["num_classes"]
@@ -336,13 +392,33 @@ def main():
         for m in results:
             print(f"  fold {m['fold']}: AUC={m.get('auc', float('nan')):.4f} "
                   f"acc={m.get('accuracy', float('nan')):.4f} "
+                  f"bal_acc={m.get('balanced_accuracy', float('nan')):.4f} "
                   f"macroF1={m.get('macro_f1', float('nan')):.4f} "
+                  f"kappa={m.get('kappa', float('nan')):.4f} "
                   f"dice={m.get('dice', float('nan')):.4f}")
-        for key in ("auc", "accuracy", "macro_f1", "dice"):
-            vals = np.array([m.get(key, float('nan')) for m in results], dtype=float)
-            vals = vals[~np.isnan(vals)]
-            if len(vals):
-                print(f"  {key}: {vals.mean():.4f} ± {vals.std():.4f}")
+
+        def _ms(vals):
+            v = np.array(vals, dtype=float); v = v[~np.isnan(v)]
+            return (v.mean(), v.std()) if len(v) else (float('nan'), float('nan'))
+
+        print("  --- mean ± std ---")
+        for key in ("auc", "accuracy", "balanced_accuracy", "macro_f1", "kappa", "dice"):
+            mu, sd = _ms([m.get(key, float('nan')) for m in results])
+            print(f"  {key:<18} {mu:.4f} ± {sd:.4f}")
+
+        # per-class mean ± std across folds (benchmark protocol)
+        names = cfg["classifier"].get("class_names") or []
+        if results and "per_f1" in results[0]:
+            nC = len(results[0]["per_f1"])
+            names = names or [f"c{i}" for i in range(nC)]
+            print("  --- per-class (mean ± std across folds) ---")
+            print(f"    {'class':<8} {'sens':>13} {'spec':>13} {'F1':>13} {'AUC':>13}")
+            for c in range(nC):
+                cells = []
+                for key in ("per_sens", "per_spec", "per_f1", "per_auc"):
+                    mu, sd = _ms([m.get(key, [float('nan')]*nC)[c] for m in results])
+                    cells.append(f"{mu:.2f}±{sd:.2f}")
+                print(f"    {names[c]:<8} " + " ".join(f"{x:>13}" for x in cells))
 
 
 if __name__ == "__main__":

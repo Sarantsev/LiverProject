@@ -50,6 +50,9 @@ data:
   manifest: "data/manifest.csv"     # image_path, mask_path, tumor_type, dataset, phase, patient_id
   radiomics_csv: ""                 # optional: CSV of per-patient radiomics -> fuse into classifier
                                     # (build with scripts/extract_radiomics.py). "" = disabled
+  radiomics_fusion: early           # early (concat into head) | late (separate RF/SVM, blend probs)
+  radiomics_clf: rf                 # late-fusion model: rf | svm
+  radiomics_alpha: 0.5              # late fusion: final = alpha*deep + (1-alpha)*radiomics
 
 # --- Training (multi-task: seg + cls) ---
 train:
