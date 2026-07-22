@@ -9,6 +9,7 @@ Smoke-test the loop on CPU without weights/data:
 from __future__ import annotations
 
 import argparse
+import gc
 import math
 import os
 from collections import Counter
@@ -205,9 +206,16 @@ def _build_and_train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_pati
         print(f"DataParallel: {torch.cuda.device_count()} GPUs")
         model = torch.nn.DataParallel(model)
     train_labels = [labels_by_patient[p] for p in tr_ids]
-    return _train_loop(cfg, args, device, model, train_ds, val_ds, train_labels, work_dir,
-                       epochs=epochs, batch_size=batch_size, num_workers=num_workers,
-                       use_amp=use_amp, num_classes=num_classes)
+    result = _train_loop(cfg, args, device, model, train_ds, val_ds, train_labels, work_dir,
+                         epochs=epochs, batch_size=batch_size, num_workers=num_workers,
+                         use_amp=use_amp, num_classes=num_classes)
+    # free this fold's model + cached GPU memory before the next fold (avoid OOM accumulation).
+    # PyTorch models hold reference cycles, so an explicit gc.collect() is needed to release them.
+    del model, train_ds, val_ds
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return result
 
 
 # --------- main entry point ---------
