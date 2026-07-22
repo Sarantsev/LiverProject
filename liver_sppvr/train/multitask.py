@@ -280,6 +280,13 @@ def main():
     ap.add_argument("--lora", action="store_true", help="enable PEFT on the encoder (overrides segvol.lora.enabled)")
     ap.add_argument("--lora-variant", choices=["lora", "dora"], default=None,
                     help="PEFT variant (overrides segvol.lora.variant)")
+    ap.add_argument("--lora-rank", type=int, default=None,
+                    help="PEFT rank -- lower = less capacity, less overfit (alpha set to 2*rank)")
+    ap.add_argument("--lora-targets", default=None,
+                    help="comma-separated Linear name substrings to adapt, e.g. 'qkv' or "
+                         "'qkv,out_proj' (fewer = less capacity). Overrides segvol.lora.targets")
+    ap.add_argument("--lora-dropout", type=float, default=None,
+                    help="PEFT dropout -- higher = more regularization (overrides segvol.lora.dropout)")
     ap.add_argument("--seg-prompt", choices=["text", "box"], default=None,
                     help="segmentation prompt mode (overrides train.seg_prompt)")
     ap.add_argument("--zoom", type=float, default=None,
@@ -309,6 +316,14 @@ def main():
         cfg.setdefault("segvol", {}).setdefault("lora", {})["enabled"] = True
     if args.lora_variant:
         cfg.setdefault("segvol", {}).setdefault("lora", {})["variant"] = args.lora_variant
+    _lcfg = cfg.setdefault("segvol", {}).setdefault("lora", {})
+    if args.lora_rank is not None:
+        _lcfg["rank"] = args.lora_rank
+        _lcfg["alpha"] = 2 * args.lora_rank          # keep alpha = 2*rank
+    if args.lora_targets:
+        _lcfg["targets"] = [t.strip() for t in args.lora_targets.split(",")]
+    if args.lora_dropout is not None:
+        _lcfg["dropout"] = args.lora_dropout
     if args.seg_prompt:
         cfg["train"]["seg_prompt"] = args.seg_prompt
     if args.zoom is not None:
