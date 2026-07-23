@@ -101,7 +101,7 @@ def train_one_epoch(model, loader, optimizer, loss_fn, device, *,
                     scaler=None, seg_prompt_mode: str = "text", bbox_shift: int = 0) -> dict:
     model.train()
     use_amp = scaler is not None and scaler.is_enabled()
-    agg = {"loss": 0.0, "seg_loss": 0.0, "cls_loss": 0.0, "n": 0}
+    agg = {"loss": 0.0, "seg_loss": 0.0, "cls_loss": 0.0, "con_loss": 0.0, "n": 0}
     for batch in loader:
         batch = _batch_to_device(batch, device)
         bs = batch["label"].shape[0]
@@ -129,6 +129,7 @@ def train_one_epoch(model, loader, optimizer, loss_fn, device, *,
         agg["loss"] += losses["loss"].item() * bs
         agg["seg_loss"] += float(losses["seg_loss"]) * bs
         agg["cls_loss"] += float(losses["cls_loss"]) * bs
+        agg["con_loss"] += float(losses.get("con_loss", 0.0)) * bs
         agg["n"] += bs
     n = max(agg.pop("n"), 1)
     return {k: v / n for k, v in agg.items()}
@@ -167,12 +168,13 @@ def evaluate(model, loader, device, *, num_classes: int, seg_text: str = "liver 
         metrics["accuracy"] = float(np.mean(np.array(y_true) == np.array(y_pred)))
         try:
             from sklearn.metrics import (f1_score, balanced_accuracy_score,
-                                         roc_auc_score, cohen_kappa_score)
+                                         roc_auc_score, cohen_kappa_score, confusion_matrix)
             labels = list(range(num_classes))
             metrics["macro_f1"] = float(f1_score(y_true, y_pred, average="macro",
                                                  labels=labels, zero_division=0))
             metrics["balanced_accuracy"] = float(balanced_accuracy_score(y_true, y_pred))
             metrics["kappa"] = float(cohen_kappa_score(y_true, y_pred, labels=labels))
+            metrics["confusion"] = confusion_matrix(y_true, y_pred, labels=labels).tolist()
             try:
                 metrics["auc"] = float(roc_auc_score(
                     y_true, np.array(y_prob), multi_class="ovr", average="macro", labels=labels))

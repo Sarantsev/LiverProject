@@ -74,6 +74,10 @@ train:
   loss_weights:
     seg: 1.0
     cls: 1.0
+  # supervised contrastive loss (SupCon) -- sharpens boundaries between confusable classes
+  contrastive: 0.0        # weight (0 = off; try 0.1-0.5)
+  contrastive_temp: 0.1
+  contrastive_queue: 512  # feature memory queue (needed since batch is small)
   work_dir: "./work_dir"
 
 # --- Radiomics (PyRadiomics) ---
