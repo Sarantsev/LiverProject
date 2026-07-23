@@ -14,6 +14,7 @@ class TumorClassificationHead(nn.Module):
         dropout: float = 0.3,
         pool: str = "masked",          # "masked" | "gap"
         extra_feat_dim: int = 0,       # size of external features (radiomics); 0 = none
+        proj_dim: int = 128,           # projection dim for supervised contrastive loss
     ):
         super().__init__()
         if pool not in ("masked", "gap"):
@@ -28,6 +29,10 @@ class TumorClassificationHead(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, num_classes),
+        )
+        # projection head for supervised contrastive loss (SupCon): representation -> unit sphere
+        self.proj = nn.Sequential(
+            nn.Linear(in_dim, in_dim), nn.GELU(), nn.Linear(in_dim, proj_dim),
         )
 
     @staticmethod
@@ -58,10 +63,12 @@ class TumorClassificationHead(nn.Module):
         embedding: torch.Tensor,
         mask: torch.Tensor | None = None,
         extra_feat: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        return_proj: bool = False,
+    ):
         """embedding: (B,C,d,h,w); mask: (B,1,...) for pool='masked'.
 
-        return: logits (B, num_classes).
+        return: logits (B, num_classes); if return_proj also the L2-normalized projection
+        (B, proj_dim) for the supervised contrastive loss.
         """
         if self.pool == "masked":
             if mask is None:
@@ -75,4 +82,7 @@ class TumorClassificationHead(nn.Module):
                 raise ValueError(f"extra_feat_dim={self.extra_feat_dim} but extra_feat=None.")
             feat = torch.cat([feat, extra_feat], dim=1)
 
-        return self.mlp(feat)
+        logits = self.mlp(feat)
+        if return_proj:
+            return logits, F.normalize(self.proj(feat), dim=1)
+        return logits

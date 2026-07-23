@@ -127,8 +127,8 @@ class SegVolMultiTask(nn.Module):
         return logits
 
     # ---------- classification ----------
-    def classify(self, embedding, mask=None, extra_feat=None) -> torch.Tensor:
-        return self.cls_head(embedding, mask=mask, extra_feat=extra_feat)
+    def classify(self, embedding, mask=None, extra_feat=None, return_proj=False):
+        return self.cls_head(embedding, mask=mask, extra_feat=extra_feat, return_proj=return_proj)
 
     # ---------- full multi-task pass ----------
     def forward(
@@ -182,6 +182,9 @@ class SegVolMultiTask(nn.Module):
                 mask = cls_mask
                 if mask is None and seg_logits is not None and self.cls_head.pool == "masked":
                     mask = (torch.sigmoid(seg_logits) > 0.5).float()
-                out["cls_logits"] = self.classify(cls_embedding, mask=mask, extra_feat=cls_extra_feat)
+                logits, proj = self.classify(cls_embedding, mask=mask,
+                                             extra_feat=cls_extra_feat, return_proj=True)
+                out["cls_logits"] = logits
+                out["cls_proj"] = proj          # for supervised contrastive loss
 
         return out

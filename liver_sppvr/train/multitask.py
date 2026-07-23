@@ -129,6 +129,43 @@ def _collate(batch):
     return collate_multiphase(batch)
 
 
+def save_confusion(cm, class_names, out_prefix: str, title: str = "Confusion matrix") -> None:
+    """Save a confusion matrix (rows=true, cols=pred) as CSV, and a PNG heatmap if matplotlib
+    is available. `out_prefix` -> writes out_prefix.csv and out_prefix.png."""
+    import csv
+    import numpy as np
+    cm = np.array(cm)
+    names = list(class_names) if class_names else [f"c{i}" for i in range(len(cm))]
+    with open(out_prefix + ".csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["true\\pred"] + names)
+        for i, name in enumerate(names):
+            w.writerow([name] + cm[i].tolist())
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        row_sum = cm.sum(1, keepdims=True).clip(min=1)
+        norm = cm / row_sum                                  # per-true-class recall
+        fig, ax = plt.subplots(figsize=(5.6, 5))
+        im = ax.imshow(norm, cmap="Blues", vmin=0, vmax=1)
+        ax.set_xticks(range(len(names))); ax.set_xticklabels(names, rotation=45, ha="right")
+        ax.set_yticks(range(len(names))); ax.set_yticklabels(names)
+        ax.set_xlabel("Predicted"); ax.set_ylabel("True")
+        ax.set_title(title)
+        for i in range(len(names)):
+            for j in range(len(names)):
+                ax.text(j, i, f"{int(cm[i, j])}\n{norm[i, j]*100:.0f}%", ha="center", va="center",
+                        fontsize=8, color="white" if norm[i, j] > 0.5 else "black")
+        fig.colorbar(im, ax=ax, fraction=0.046, label="row-normalized (recall)")
+        fig.tight_layout()
+        fig.savefig(out_prefix + ".png", dpi=150)
+        plt.close(fig)
+        print(f"  confusion matrix -> {out_prefix}.csv / .png")
+    except Exception as e:
+        print(f"  confusion matrix -> {out_prefix}.csv (PNG skipped: {e})")
+
+
 def _print_per_class(ev: dict, class_names) -> None:
     """Print per-class sensitivity/specificity/F1/AUC + Cohen's kappa (benchmark protocol)."""
     if "per_f1" not in ev:
@@ -155,11 +192,35 @@ def _train_loop(cfg, args, device, model, train_ds, val_ds, train_labels, work_d
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
                             collate_fn=_collate, num_workers=num_workers,
                             pin_memory=pin, persistent_workers=num_workers > 0)
+    seg_prompt_mode = tcfg.get("seg_prompt", "text")
+
+    # eval-only: load the finished checkpoint, evaluate once, save confusion (no training)
+    if getattr(args, "eval_only", False):
+        ckpt = os.path.join(work_dir, "best.pth")
+        if os.path.exists(ckpt):
+            sd = torch.load(ckpt, map_location=device)["model"]
+            (model.module if isinstance(model, torch.nn.DataParallel) else model).load_state_dict(sd)
+            print(f"eval-only: loaded {ckpt}")
+        else:
+            print(f"eval-only: no checkpoint at {ckpt} -- evaluating untrained model")
+        ev = evaluate(model, val_loader, device, num_classes=num_classes,
+                      seg_prompt_mode=seg_prompt_mode, rf=rf, rf_alpha=rf_alpha)
+        print(f"  eval: acc={ev.get('accuracy', float('nan')):.4f} "
+              f"bal_acc={ev.get('balanced_accuracy', float('nan')):.4f} "
+              f"AUC={ev.get('auc', float('nan')):.4f} kappa={ev.get('kappa', float('nan')):.4f}")
+        _print_per_class(ev, cfg["classifier"].get("class_names"))
+        if "confusion" in ev:
+            save_confusion(ev["confusion"], cfg["classifier"].get("class_names"),
+                           os.path.join(work_dir, "confusion"), title="Confusion (eval-only)")
+        return {"score": ev.get("auc", -1.0), "epoch": -1, **ev}
 
     cw = class_weights(train_labels, num_classes).to(device)
     loss_fn = MultiTaskLoss(seg_weight=tcfg["loss_weights"]["seg"],
                             cls_weight=tcfg["loss_weights"]["cls"],
-                            class_weight=cw).to(device)
+                            class_weight=cw,
+                            con_weight=tcfg.get("contrastive", 0.0),
+                            con_temp=tcfg.get("contrastive_temp", 0.1),
+                            queue_size=tcfg.get("contrastive_queue", 512)).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=tcfg["lr"],
                                   weight_decay=tcfg["weight_decay"])
     scheduler = make_scheduler(optimizer, tcfg["warmup_epoch"], epochs)
@@ -168,7 +229,6 @@ def _train_loop(cfg, args, device, model, train_ds, val_ds, train_labels, work_d
     os.makedirs(work_dir, exist_ok=True)
     unfreeze_epoch = cfg["segvol"].get("unfreeze_epoch", -1)
     patience = tcfg.get("early_stop_patience", 0)
-    seg_prompt_mode = tcfg.get("seg_prompt", "text")
     bbox_shift = tcfg.get("bbox_shift", 0)
 
     best, best_epoch, no_improve, best_ev = -1.0, -1, 0, {}
@@ -183,7 +243,7 @@ def _train_loop(cfg, args, device, model, train_ds, val_ds, train_labels, work_d
         ev = evaluate(model, val_loader, device, num_classes=num_classes,
                       seg_prompt_mode=seg_prompt_mode, rf=rf, rf_alpha=rf_alpha)
         print(f"[epoch {epoch+1}/{epochs}] train_loss={tr['loss']:.4f} "
-              f"seg={tr['seg_loss']:.4f} cls={tr['cls_loss']:.4f} | "
+              f"seg={tr['seg_loss']:.4f} cls={tr['cls_loss']:.4f} con={tr.get('con_loss', 0.0):.4f} | "
               f"val_dice={ev.get('dice', float('nan')):.4f} | "
               f"acc={ev.get('accuracy', float('nan')):.4f} "
               f"bal_acc={ev.get('balanced_accuracy', float('nan')):.4f} "
@@ -212,6 +272,9 @@ def _train_loop(cfg, args, device, model, train_ds, val_ds, train_labels, work_d
           f"macroF1={best_ev.get('macro_f1', float('nan')):.4f} "
           f"AUC={best_ev.get('auc', float('nan')):.4f}")
     _print_per_class(best_ev, cfg["classifier"].get("class_names"))
+    if "confusion" in best_ev:
+        save_confusion(best_ev["confusion"], cfg["classifier"].get("class_names"),
+                       os.path.join(work_dir, "confusion"), title="Confusion (best epoch)")
     return {"score": best, "epoch": best_epoch, **best_ev}
 
 
@@ -309,6 +372,12 @@ def main():
                     help="stratified k-fold cross-validation (1 = single split)")
     ap.add_argument("--fold", type=int, default=None,
                     help="with --kfold, run only this fold index (0..k-1); default = all folds")
+    ap.add_argument("--eval-only", action="store_true",
+                    help="skip training: load each fold's best.pth and evaluate (e.g. to build "
+                         "the confusion matrix from finished runs)")
+    ap.add_argument("--contrastive", type=float, default=None,
+                    help="supervised contrastive loss weight (overrides train.contrastive); "
+                         "sharpens confusable classes, try 0.1-0.5")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -340,6 +409,8 @@ def main():
         cfg["multiphase"]["fusion"] = args.fusion
     if args.radiomics_fusion:
         cfg.setdefault("data", {})["radiomics_fusion"] = args.radiomics_fusion
+    if args.contrastive is not None:
+        cfg["train"]["contrastive"] = args.contrastive
     set_seed(cfg["project"]["seed"])
     device = resolve_device(args.device or cfg.get("device", "auto"))
     num_classes = cfg["classifier"]["num_classes"]
@@ -434,6 +505,14 @@ def main():
                     mu, sd = _ms([m.get(key, [float('nan')]*nC)[c] for m in results])
                     cells.append(f"{mu:.2f}±{sd:.2f}")
                 print(f"    {names[c]:<8} " + " ".join(f"{x:>13}" for x in cells))
+
+        # total out-of-fold confusion matrix (sum over folds -> all patients, each once)
+        conf = [m.get("confusion") for m in results if m.get("confusion") is not None]
+        if conf:
+            total = np.sum([np.array(c) for c in conf], axis=0)
+            save_confusion(total, cfg["classifier"].get("class_names"),
+                           os.path.join(work_dir, "confusion_total"),
+                           title="Confusion matrix (out-of-fold, all patients)")
 
 
 if __name__ == "__main__":
