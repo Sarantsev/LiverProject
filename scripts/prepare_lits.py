@@ -31,18 +31,34 @@ from collections import Counter
 
 
 def _find_pairs(src: str):
-    """Yield (n, volume_path, seg_path) for every volume-<n> with a matching segmentation."""
-    vols = {}
-    segs = {}
+    """Yield (n, volume_path, seg_path) for each image with a matching label.
+
+    Handles two on-disk conventions:
+      * LiTS / Kaggle:  volume-<n>.nii(.gz)  +  segmentation-<n>.nii(.gz)   (same dir)
+      * MSD Task03:     imagesTr/liver_<n>.nii.gz  +  labelsTr/liver_<n>.nii.gz
+    (MSD imagesTs/ has no labels -> skipped. AppleDouble '._*' files ignored.)
+    """
+    vols, segs = {}, {}
     for p in glob.glob(os.path.join(src, "**", "*.nii*"), recursive=True):
         base = os.path.basename(p)
-        m = re.match(r"volume-(\d+)\.nii(\.gz)?$", base)
-        if m:
-            vols[int(m.group(1))] = p
+        if base.startswith("._"):                      # macOS AppleDouble junk in tars
             continue
-        m = re.match(r"segmentation-(\d+)\.nii(\.gz)?$", base)
+        parent = os.path.basename(os.path.dirname(p))
+        m = re.match(r"segmentation[-_](\d+)\.nii(\.gz)?$", base)
         if m:
-            segs[int(m.group(1))] = p
+            segs[int(m.group(1))] = p; continue
+        m = re.match(r"volume[-_](\d+)\.nii(\.gz)?$", base)
+        if m:
+            vols[int(m.group(1))] = p; continue
+        m = re.match(r"liver[-_](\d+)\.nii(\.gz)?$", base)   # MSD Task03 (image & label share name)
+        if m:
+            n = int(m.group(1))
+            if parent == "labelsTr":
+                segs[n] = p
+            elif parent == "imagesTs":
+                continue                               # test split: no public label
+            else:                                      # imagesTr (or flat) -> image
+                vols[n] = p
     for n in sorted(vols):
         if n in segs:
             yield n, vols[n], segs[n]
