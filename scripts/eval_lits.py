@@ -57,8 +57,10 @@ def run_mode(model, loader, device, mode: str):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--ckpt", required=True, help="path to best.pth (dict with key 'model')")
+    ap.add_argument("--config", default=None,
+                    help="fallback config; by default the config saved INSIDE the checkpoint is used "
+                         "(guarantees the architecture matches the weights)")
+    ap.add_argument("--ckpt", required=True, help="path to best.pth (dict with key 'model'/'config')")
     ap.add_argument("--manifest", required=True, help="LiTS manifest CSV (from build_manifest.py)")
     ap.add_argument("--prompt", choices=["box", "text", "both"], default="both")
     ap.add_argument("--device", default=None)
@@ -68,7 +70,17 @@ def main() -> int:
                     help="zoom-in crop around the tumor on eval (match your best-run val setup)")
     args = ap.parse_args()
 
-    cfg = load_config(args.config)
+    # prefer the config saved inside the checkpoint -> the model is built exactly as trained
+    ckpt = torch.load(args.ckpt, map_location="cpu")
+    cfg = ckpt.get("config")
+    if cfg is not None:
+        print(f"using config embedded in {args.ckpt}")
+    elif args.config:
+        cfg = load_config(args.config)
+        print(f"checkpoint has no embedded config -> using {args.config}")
+    else:
+        raise SystemExit("checkpoint has no embedded config and --config was not given")
+
     set_seed(cfg["project"]["seed"])
     device = resolve_device(args.device or cfg.get("device", "auto"))
 
@@ -99,7 +111,6 @@ def main() -> int:
                         num_workers=args.num_workers, collate_fn=collate_multiphase)
 
     model = build_segvol_multitask(cfg, device)
-    ckpt = torch.load(args.ckpt, map_location=device)
     sd = ckpt.get("model", ckpt)
     missing, unexpected = model.load_state_dict(sd, strict=False)
     print(f"loaded {args.ckpt}: missing={len(missing)} unexpected={len(unexpected)} "
