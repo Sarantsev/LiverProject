@@ -67,8 +67,14 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--zoom-eval", action="store_true",
-                    help="zoom-in crop around the tumor on eval (match your best-run val setup)")
+                    help="force a zoom-in crop around the GT tumor on eval (optimistic: leaks GT "
+                         "localization). Default follows the checkpoint's config.")
+    ap.add_argument("--no-zoom", action="store_true",
+                    help="force zoom OFF -> segment the whole (resampled) volume, no GT-derived crop. "
+                         "Use this for the honest, fully-automatic-style comparison.")
     args = ap.parse_args()
+    if args.zoom_eval and args.no_zoom:
+        raise SystemExit("--zoom-eval and --no-zoom are mutually exclusive")
 
     # prefer the config saved inside the checkpoint -> the model is built exactly as trained
     ckpt = torch.load(args.ckpt, map_location="cpu")
@@ -90,7 +96,7 @@ def main() -> int:
 
     pcfg = cfg.get("preprocess", {})
     tcfg = cfg.get("train", {})
-    zoom_eval = args.zoom_eval or tcfg.get("zoom_eval", False)
+    zoom_eval = False if args.no_zoom else (args.zoom_eval or tcfg.get("zoom_eval", False))
     man = load_manifest(args.manifest)
     ds = MultiPhaseLiverDataset(
         man,
