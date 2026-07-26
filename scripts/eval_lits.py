@@ -84,8 +84,9 @@ def main() -> int:
     set_seed(cfg["project"]["seed"])
     device = resolve_device(args.device or cfg.get("device", "auto"))
 
-    # decouple the classifier/radiomics -- we only evaluate segmentation
-    cfg.setdefault("classifier", {})["extra_feat_dim"] = 0
+    # NB: keep the embedded classifier dims (incl. radiomics extra_feat_dim) so the cls-head
+    # weights load without a size mismatch. The classifier is never executed here -- we call
+    # the model with return_cls=False -- so no radiomics input is needed at eval time.
 
     pcfg = cfg.get("preprocess", {})
     tcfg = cfg.get("train", {})
