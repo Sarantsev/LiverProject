@@ -267,4 +267,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # 'spawn' start method: CUDA-safe and free of the fork+OpenMP deadlock that hangs
+    # DataLoader workers on the first batch (fork copies locked BLAS/OpenMP mutexes).
+    import torch.multiprocessing as _mp
+    try:
+        _mp.set_start_method("spawn")
+    except RuntimeError:
+        pass
     sys.exit(main())
