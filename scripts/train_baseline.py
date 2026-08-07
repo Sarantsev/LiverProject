@@ -108,11 +108,14 @@ def train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, work_d
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     os.makedirs(work_dir, exist_ok=True)
 
+    import time
+    n_batches = len(train_loader)
     best, best_epoch, no_improve, best_ev = -1.0, -1, 0, {}
     for epoch in range(epochs):
         model.train()
         run = 0.0
-        for batch in train_loader:
+        t0 = time.time()
+        for bi, batch in enumerate(train_loader):
             phases_t = batch["phases"].to(device)
             pp = batch["phase_present"].to(device)
             extra = batch.get("radiomics")
@@ -130,6 +133,11 @@ def train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, work_d
                 loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
             run += loss.item() * y.shape[0]
+            if bi % args.log_interval == 0:      # visible per-batch progress (data loading is slow)
+                sps = (bi + 1) * args.batch_size / max(time.time() - t0, 1e-6)
+                print(f"  ep{epoch+1} [{bi+1}/{n_batches}] loss={loss.item():.4f} "
+                      f"({sps:.1f} samp/s)", flush=True)
+        print(f"  ep{epoch+1} evaluating on {len(va_ids)} val patients...", flush=True)
         ev = evaluate_baseline(model, val_loader, device, num_classes)
         print(f"[epoch {epoch+1}/{epochs}] loss={run/max(len(train_ds),1):.4f} | "
               f"acc={ev['accuracy']:.4f} bal_acc={ev['balanced_accuracy']:.4f} "
@@ -175,6 +183,7 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--weight-decay", type=float, default=1e-2)
     ap.add_argument("--patience", type=int, default=20)
+    ap.add_argument("--log-interval", type=int, default=10, help="print train progress every N batches")
     ap.add_argument("--amp", action="store_true")
     ap.add_argument("--resize", default=None, help="resize each phase to D,H,W (e.g. 32,128,128) to cut VRAM")
     ap.add_argument("--device", default=None)
