@@ -125,6 +125,9 @@ def train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, work_d
             with torch.cuda.amp.autocast(enabled=use_amp):
                 logits = model(phases=phases_t, phase_present=pp, extra_feat=extra)
                 loss = focal_ce_loss(logits, y, gamma=tcfg.get("focal_gamma", 2.0), weight=cw)
+                aux = getattr(model, "last_aux", None)      # e.g. LCA-DB attention-similarity
+                if aux is not None:
+                    loss = loss + aux
             if use_amp:
                 scaler.scale(loss).backward(); scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
