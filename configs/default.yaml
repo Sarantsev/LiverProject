@@ -49,7 +49,7 @@ classifier:
 data:
   manifest: "data/manifest.csv"     # image_path, mask_path, tumor_type, dataset, phase, patient_id
   radiomics_csv: ""                 # optional: CSV of per-patient radiomics -> fuse into classifier
-                                    # (build with scripts/extract_radiomics.py). "" = disabled
+                                    # (build with scripts/build_clinical.py). "" = disabled
   radiomics_fusion: early           # early (concat into head) | late (separate RF/SVM, blend probs)
   radiomics_clf: rf                 # late-fusion model: rf | svm
   radiomics_alpha: 0.5              # late fusion: final = alpha*deep + (1-alpha)*radiomics
@@ -80,7 +80,3 @@ train:
   contrastive_queue: 512  # feature memory queue (needed since batch is small)
   work_dir: "./work_dir"
 
-# --- Radiomics (PyRadiomics) ---
-radiomics:
-  params: "configs/radiomics_params.yaml"
-  feature_classes: [shape, firstorder, glcm, glrlm, glszm]

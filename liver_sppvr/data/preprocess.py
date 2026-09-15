@@ -149,3 +149,19 @@ def load_mask(
     t = torch.from_numpy(np.ascontiguousarray(arr)).float()[None, None]
     t = F.interpolate(t, size=tuple(spatial_size), mode="nearest")
     return t[0]
+
+
+def frac_bounds(frac_box: "FracBox", shape) -> list:
+    """Fractional [0,1] box -> integer [lo, hi) index bounds per axis for a (D,H,W) `shape`.
+
+    Inverse of the fractional convention used by bbox_fraction_*: lets one box computed on
+    a predicted mask be applied to volumes of different native shapes (all 4 phases).
+    Guarantees a non-empty range on every axis.
+    """
+    d0, h0, w0, d1, h1, w1 = frac_box
+    out = []
+    for f0, f1, n in ((d0, d1, shape[0]), (h0, h1, shape[1]), (w0, w1, shape[2])):
+        i0 = max(0, min(n - 1, int(round(f0 * n))))
+        i1 = max(i0 + 1, min(n, int(round(f1 * n))))
+        out.append((i0, i1))
+    return out
