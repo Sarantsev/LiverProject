@@ -46,7 +46,7 @@ cat <<'NOTE'
 
 === Готово ===
 Активировать окружение:    source segvol_env/bin/activate
-Проверить пайплайн (CPU):  python -m liver_sppvr.train.multitask --config configs/default.yaml --dry-run --device cpu
+Проверить пайплайн (CPU):  python -m pytest tests -q
 
 --- FALLBACK: если torch+cu117 не подходит под GPU/драйвер ---
 Удалите строку torch выше и поставьте новее под вашу CUDA, например:

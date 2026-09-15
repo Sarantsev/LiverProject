@@ -1,9 +1,10 @@
-"""Liver-tumor CDSS built on top of SegVol.
+"""Liver-tumour CDSS on multi-phase CT (MCT-LTDiag).
 
-The package adds task-specific heads on top of SegVol (a 3D foundation model):
-- multiphase: fusion of 4-phase CT
-- classifier: tumor-type classification head (multi-class differential diagnosis)
-- (further) data / train / radiomics
+Two independent models, combined in a fully automatic cascade:
+- segmentation: nnU-Net (external; scripts/export_nnunet.py + run_nnunet.sh)
+- classification: `LiverTumorClassifier` = pretrained CT backbone (SegVol ViT | Merlin)
+  + multi-phase fusion + head, optionally fused with clinical features
+- cascade: predicted mask -> ROI + masked pooling -> tumour type (scripts/infer_cascade.py)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

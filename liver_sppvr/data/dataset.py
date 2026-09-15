@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 from typing import List, Optional, Sequence
 
 import torch
@@ -8,114 +7,136 @@ from torch.utils.data import Dataset
 
 from .preprocess import load_ct, load_mask
 
+ROI_MODES = ("none", "body", "pred")
+
+
+def load_pred_masks(csv_path: str) -> dict:
+    """pred_masks.csv (patient_id, pred_mask_path) -> {patient_id: path}. These are the
+    OUT-OF-FOLD predictions of the segmentation model: every patient's mask comes from a
+    model that never trained on that patient."""
+    import pandas as pd
+    df = pd.read_csv(csv_path)
+    return dict(zip(df["patient_id"].astype(str), df["pred_mask_path"].astype(str)))
+
 
 class MultiPhaseLiverDataset(Dataset):
+    """One item = one patient: all phases resampled to `spatial_size` + tumour mask + label.
+
+    mask_override: {patient_id: path} -- use these masks (e.g. nnU-Net out-of-fold
+        predictions) INSTEAD of the ground truth. Strict: a listed dataset patient
+        without an override raises, so GT can never leak in silently.
+    roi: 'none' | 'body' (crop the body by intensity, SegVol CropForeground) |
+         'pred' (crop around the OVERRIDE mask -> the tumour fills the window; needs
+         mask_override; never derived from GT).
+    mask_noise: train-time probability of perturbing the mask (dilate/erode/shift/drop)
+        so a classifier trained on masks stays robust to segmentation errors.
+    clinical: {patient_id: np.float32 vector} -> item['clinical'].
+    """
     def __init__(
         self,
-        manifest,                      # pandas.DataFrame (see manifest.load_manifest)
+        manifest,
         class_names: Sequence[str],
         phases: Sequence[str] = ("non_contrast", "arterial", "portal", "delayed"),
         spatial_size: Sequence[int] = (32, 256, 256),
         hu_window: Sequence[float] = (-175, 250),
-        patient_ids: Optional[Sequence[str]] = None,   # for the train/val/test split
-        augment: bool = False,                         # 3D augmentations (train only)
-        zoom: float = 0.0,                             # probability of a zoom-in crop [0..1] (0 = off)
-        zoom_margin: float = 0.5,                      # context margin around the tumor (fraction of extent)
-        normalize: str = "hu",                         # 'foreground' (SegVol) | 'hu'
-        crop_foreground: bool = False,                 # crop the body before resize (SegVol-style)
-        radiomics: Optional[dict] = None,              # {patient_id: np.float32 vector} for fusion
+        normalize: str = "foreground",
+        patient_ids: Optional[Sequence[str]] = None,
+        augment: bool = False,
+        roi: str = "body",
+        roi_margin: float = 0.5,
+        mask_override: Optional[dict] = None,
+        mask_noise: float = 0.0,
+        clinical: Optional[dict] = None,
     ):
+        if roi not in ROI_MODES:
+            raise ValueError(f"roi must be one of {ROI_MODES}, got {roi!r}")
+        if roi == "pred" and not mask_override:
+            raise ValueError("roi='pred' needs mask_override (predicted masks); "
+                             "a GT-derived ROI is a leak and is not supported")
         self.class_names = list(class_names)
-        self.radiomics = radiomics
-        self.radiomics_dim = len(next(iter(radiomics.values()))) if radiomics else 0
         self.class_to_idx = {c: i for i, c in enumerate(self.class_names)}
         self.phases = list(phases)
         self.spatial_size = tuple(spatial_size)
         self.hu_window = tuple(hu_window)
-        self.augment = augment
-        self.zoom = zoom
-        self.zoom_margin = zoom_margin
         self.normalize = normalize
-        self.crop_foreground = crop_foreground
+        self.augment = augment
+        self.roi, self.roi_margin = roi, roi_margin
+        self.mask_override = mask_override
+        self.mask_noise = mask_noise
+        self.clinical = clinical
+        self.clinical_dim = len(next(iter(clinical.values()))) if clinical else 0
 
         df = manifest
         if patient_ids is not None:
             df = df[df["patient_id"].isin(set(patient_ids))]
-        # group by patient
         self._patients: List[dict] = []
         for pid, grp in df.groupby("patient_id"):
             tumor_type = grp["tumor_type"].iloc[0]
             if tumor_type not in self.class_to_idx:
                 continue
-            phase_to_path = dict(zip(grp["phase"], grp["image_path"]))
+            if mask_override is not None and pid not in mask_override:
+                raise KeyError(f"mask_override has no predicted mask for patient {pid!r}")
             self._patients.append(dict(
-                patient_id=pid,
-                tumor_type=tumor_type,
-                label=self.class_to_idx[tumor_type],
-                mask_path=grp["mask_path"].iloc[0],
-                phase_to_path=phase_to_path,
+                patient_id=pid, tumor_type=tumor_type, label=self.class_to_idx[tumor_type],
+                mask_path=(mask_override[pid] if mask_override is not None else grp["mask_path"].iloc[0]),
+                phase_to_path=dict(zip(grp["phase"], grp["image_path"])),
             ))
 
     def __len__(self) -> int:
         return len(self._patients)
 
+    def _frac_box(self, rec: dict):
+        """One fractional box per patient, applied identically to every phase + mask."""
+        if self.roi == "pred":
+            from .preprocess import bbox_fraction_from_mask
+            return bbox_fraction_from_mask(rec["mask_path"], margin=self.roi_margin)
+        if self.roi == "body":
+            from .preprocess import bbox_fraction_foreground
+            ref = rec["phase_to_path"].get("portal") or next(iter(rec["phase_to_path"].values()), None)
+            return bbox_fraction_foreground(ref) if ref is not None else None
+        return None
+
     def __getitem__(self, idx: int) -> dict:
         rec = self._patients[idx]
         d, h, w = self.spatial_size
+        frac_box = self._frac_box(rec)
 
-        # One fractional box per sample, applied synchronously to all phases + mask
-        # (fractional coords -> works across phases of different native shape). Priority:
-        # tumor zoom-in (with probability self.zoom) -> otherwise CropForeground by body.
-        frac_box = None
-        if self.zoom > 0 and random.random() < self.zoom:
-            from .preprocess import bbox_fraction_from_mask
-            frac_box = bbox_fraction_from_mask(rec["mask_path"], margin=self.zoom_margin)
-        elif self.crop_foreground:
-            from .preprocess import bbox_fraction_foreground
-            # body is computed from the reference phase (portal -- the mask lives on it),
-            # then the same box is applied to all phases
-            ref = rec["phase_to_path"].get("portal") or next(iter(rec["phase_to_path"].values()), None)
-            if ref is not None:
-                frac_box = bbox_fraction_foreground(ref)
-
-        phase_tensors, phase_present = [], []
+        tensors, present = [], []
         for phase in self.phases:
             path = rec["phase_to_path"].get(phase)
             if path is None:
-                phase_tensors.append(torch.zeros(1, d, h, w))
-                phase_present.append(0.0)
+                tensors.append(torch.zeros(1, d, h, w)); present.append(0.0)
             else:
-                phase_tensors.append(load_ct(path, self.hu_window, self.spatial_size,
-                                             frac_box=frac_box, normalize=self.normalize))
-                phase_present.append(1.0)
-        phases = torch.stack(phase_tensors, dim=0)            # (P,1,D,H,W)
+                tensors.append(load_ct(path, self.hu_window, self.spatial_size,
+                                       frac_box=frac_box, normalize=self.normalize))
+                present.append(1.0)
+        phases = torch.stack(tensors, dim=0)                        # (P,1,D,H,W)
+        mask = load_mask(rec["mask_path"], self.spatial_size, frac_box=frac_box)   # (1,D,H,W)
 
-        mask = load_mask(rec["mask_path"], self.spatial_size, frac_box=frac_box)  # (1,D,H,W)
         if self.augment:
-            from .augment import augment_multiphase
+            from .augment import augment_multiphase, perturb_mask
             phases, mask = augment_multiphase(phases, mask, clip01=(self.normalize == "hu"))
-        item = dict(
-            phases=phases,
-            mask=mask,
-            label=torch.tensor(rec["label"], dtype=torch.long),
-            phase_present=torch.tensor(phase_present),
-            patient_id=rec["patient_id"],
-        )
-        if self.radiomics is not None:
-            vec = self.radiomics.get(rec["patient_id"])
-            item["radiomics"] = (torch.from_numpy(vec).float() if vec is not None
-                                 else torch.zeros(self.radiomics_dim))
+            if self.mask_noise > 0:
+                mask = perturb_mask(mask, p=self.mask_noise)
+
+        item = dict(phases=phases, mask=mask,
+                    label=torch.tensor(rec["label"], dtype=torch.long),
+                    phase_present=torch.tensor(present), patient_id=rec["patient_id"])
+        if self.clinical is not None:
+            vec = self.clinical.get(rec["patient_id"])
+            item["clinical"] = (torch.from_numpy(vec).float() if vec is not None
+                                else torch.zeros(self.clinical_dim))
         return item
 
 
 def collate_multiphase(batch: List[dict]) -> dict:
     out = dict(
-        phases=torch.stack([b["phases"] for b in batch], dim=0),       # (B,P,1,D,H,W)
-        mask=torch.stack([b["mask"] for b in batch], dim=0),           # (B,1,D,H,W)
-        label=torch.stack([b["label"] for b in batch], dim=0),         # (B,)
+        phases=torch.stack([b["phases"] for b in batch], dim=0),        # (B,P,1,D,H,W)
+        mask=torch.stack([b["mask"] for b in batch], dim=0),            # (B,1,D,H,W)
+        label=torch.stack([b["label"] for b in batch], dim=0),
         phase_present=torch.stack([b["phase_present"] for b in batch], dim=0),
         patient_id=[b["patient_id"] for b in batch],
     )
-    if "radiomics" in batch[0]:
-        out["radiomics"] = torch.stack([b["radiomics"] for b in batch], dim=0)  # (B,F)
+    if "clinical" in batch[0]:
+        out["clinical"] = torch.stack([b["clinical"] for b in batch], dim=0)   # (B,F)
     return out

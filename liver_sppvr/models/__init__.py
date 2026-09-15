@@ -1,5 +1,7 @@
+from .backbones import Backbone, SegVolViTBackbone, build_backbone
+from .classifier import LiverTumorClassifier
 from .cls_head import TumorClassificationHead
 from .multiphase import PhaseFusion
-from .segvol_multitask import SegVolMultiTask
 
-__all__ = ["TumorClassificationHead", "PhaseFusion", "SegVolMultiTask"]
+__all__ = ["Backbone", "SegVolViTBackbone", "build_backbone", "LiverTumorClassifier",
+           "TumorClassificationHead", "PhaseFusion"]

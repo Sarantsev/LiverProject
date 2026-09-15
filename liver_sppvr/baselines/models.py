@@ -312,7 +312,7 @@ class RACMFormer(_BaselineBase):
     """Image branch of RA-CMFormer: a UniFormer-style per-phase encoder (conv stages then
     a global self-attention stage over the feature-map tokens) followed by a cross-phase
     Transformer whose CLS token summarises the phases. With ``clinical_dim>0`` and an
-    ``extra_feat`` radiomics vector it becomes the full cross-modal model (Table 2a);
+    ``extra_feat`` tabular vector it becomes the cross-modal variant (Table 2);
     ``clinical_dim=0`` is the pure image branch (Table 1). Padded phases are masked.
     """
     def __init__(self, num_classes: int, n_phases: int = 4, clinical_dim: int = 0,

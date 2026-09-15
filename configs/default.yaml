@@ -1,82 +1,68 @@
 project:
   name: liver-sppvr
-  seed: 2023
+  seed: 2023                          # ONE seed for every pipeline -> identical patient folds
 
-device: auto          # auto | cuda | cpu  (auto -> cuda if available, else cpu)
-
-# --- SegVol geometry (do not change without good reason) ---
-segvol:
-  pretrain_ckpt: ""                 # path to SegVol weights on the GPU box
-  spatial_size: [32, 256, 256]      # roi_size (D, H, W)
-  patch_size:   [4, 16, 16]
-  embed_dim: 768                    # ViT embedding size (feat_shape = roi/patch = 8x16x16)
-  freeze_encoder: true              # freeze the SegVol ViT encoder -> main anti-overfit lever
-  unfreeze_epoch: -1                # -1 = never unfreeze; N = unfreeze the encoder from epoch N
-  lora:                             # PEFT on the encoder instead of a full freeze (takes priority over freeze_encoder)
-    enabled: false                  # true -> encoder base frozen + trainable low-rank adapters
-    variant: dora                   # lora | dora  (DoRA: weight-decomposed LoRA, usually stronger)
-    rank: 16                        # more capacity than 8 -> more encoder adaptation for classification
-    alpha: 32                       # keep alpha = 2*rank
-    dropout: 0.05
-    targets: [qkv, out_proj, linear1, linear2]  # attention (qkv+out_proj) + MLP (linear1/2);
-                                    # use [all] to wrap every Linear (max adaptation). Check the
-                                    # "DORA: wrapped N ..." log line -- N should rise from 12 to ~48
-
-# --- Multi-phase ---
-multiphase:
-  phases: [non_contrast, arterial, portal, delayed]   # 4 CT phases
-  fusion: attention                 # concat_stem | attention
-  hu_window: [-175, 250]            # HU window -> [0,1] (used only when normalize=hu)
-  seg_phase: portal                 # hybrid: single phase for SEGMENTATION (on-distribution for
-                                    # SegVol; mask lives on it). Classification always uses all
-                                    # phases. null/empty -> segmentation uses the fused embedding
-
-# --- Preprocessing ---
-preprocess:
-  normalize: foreground             # foreground (SegVol ForegroundNorm, z-score) | hu ([0,1] window)
-  crop_foreground: true             # crop the body before resize (analog of SegVol CropForeground)
-
-# --- Classification head ---
-classifier:
-  num_classes: 5                    # HCC, ICC, CRLM, BCLM, HH (per MCT-LTDiag)
-  class_names: [HCC, ICC, CRLM, BCLM, HH]
-  hidden_dim: 256
-  dropout: 0.3
-  pool: masked                      # masked | gap  (masked -> pool over the tumor mask)
-  extra_feat_dim: 0                 # auto-set from radiomics_csv; 0 = deep features only
+device: auto                          # auto | cuda | cpu
 
 # --- Data ---
 data:
-  manifest: "data/manifest.csv"     # image_path, mask_path, tumor_type, dataset, phase, patient_id
-  radiomics_csv: ""                 # optional: CSV of per-patient radiomics -> fuse into classifier
-                                    # (build with scripts/build_clinical.py). "" = disabled
-  radiomics_fusion: early           # early (concat into head) | late (separate RF/SVM, blend probs)
-  radiomics_clf: rf                 # late-fusion model: rf | svm
-  radiomics_alpha: 0.5              # late fusion: final = alpha*deep + (1-alpha)*radiomics
+  manifest: "data/manifest.csv"       # image_path, mask_path, tumor_type, dataset, phase, patient_id
+  clinical_csv: ""                    # scripts/build_clinical.py -> 5 objective features; "" = image-only
+  pred_masks_csv: ""                  # Stage A out-of-fold nnU-Net masks: patient_id, pred_mask_path
 
-# --- Training (multi-task: seg + cls) ---
+# --- Multi-phase CT ---
+multiphase:
+  phases: [non_contrast, arterial, portal, delayed]
+  fusion: attention                   # attention | cross_attention | concat_stem
+
+# --- Region of interest fed to the classifier (one box per patient, all phases + mask) ---
+preprocess:
+  roi: body                           # none | body (intensity crop, SegVol CropForeground) |
+                                      # pred (crop around the PREDICTED mask -> tumour fills the window;
+                                      #       never derived from GT)
+  roi_margin: 0.5                     # context around the tumour for roi=pred (fraction of extent)
+
+# --- Classifier (ours) ---
+classifier:
+  backbone: segvol                    # segvol | merlin -- two pretrained CT encoders compared head-to-head
+  finetune: dora                      # segvol: dora | lora | frozen | full   merlin: partial | frozen | full
+  mask_source: pred                   # none (GAP, image-only) | gt (semi-auto upper bound) | pred (fully-auto)
+  num_classes: 5
+  class_names: [HCC, ICC, CRLM, BCLM, HH]
+  hidden_dim: 256
+  dropout: 0.3
+
+# --- Backbones ---
+segvol:                               # BAAI/SegVol ViT-B via HF (trust_remote_code); image encoder only
+  spatial_size: [32, 256, 256]        # fixed by the pretrained positional embeddings
+  patch_size: [4, 16, 16]
+  embed_dim: 768
+  normalize: foreground               # SegVol ForegroundNorm z-score (what the encoder was pretrained on)
+  hu_window: [-175, 250]              # only used when normalize=hu
+  lora:
+    rank: 16
+    alpha: 32                         # keep alpha = 2*rank
+    dropout: 0.05
+    targets: [qkv, out_proj, linear1, linear2]   # attention + MLP; expect "DORA: wrapped ~48"
+merlin:                               # Stanford Merlin I3D-ResNet-152 (pip merlin-vlm, HF stanfordmimi/Merlin)
+  spatial_size: [160, 224, 224]       # (D,H,W): 3 mm slices / 1.5 mm in-plane, as pretrained
+  normalize: hu
+  hu_window: [-1000, 1000]            # HU -> [0,1], as pretrained
+  partial_targets: [layer4]           # finetune=partial: unfreeze the last ResNet stage (+ head)
+
+# --- Training ---
 train:
   lr: 1.0e-4
-  weight_decay: 1.0e-2   # increased (was 1e-5) against overfitting
+  weight_decay: 1.0e-2
   warmup_epoch: 10
-  num_epochs: 80         # reduced from 200: optimum was < epoch 40, overfit beyond
+  num_epochs: 80
   batch_size: 2
-  num_workers: 0         # DataLoader workers; >0 removes the GPU stall on NIfTI resampling
-  amp: false             # mixed precision (torch.cuda.amp); saves VRAM and speeds up on GPU
-  augment: true          # 3D augmentations on train (flips + intensity jitter)
-  early_stop_patience: 20  # stop if val score does not improve for N epochs (0 = off)
-  seg_prompt: text       # text | box  (box -> box from the GT mask, SegVol's strong native mode)
-  bbox_shift: 10         # box jitter on train, in voxels (prompt augmentation; no jitter on eval)
-  # --- zoom-in (analog of SegVol zoom-out-zoom-in) ---
-  zoom: 0.0              # probability of a zoom-in crop on train [0..1] (0.5 = half the samples; 0 = off)
-  zoom_eval: false       # true -> validation always in zoom-in (only compare dice with a zoom-in run!)
-  zoom_margin: 0.5       # context margin around the tumor (fraction of tumor extent on each side)
-  loss_weights:
-    seg: 1.0
-    cls: 1.0
-  # supervised contrastive loss (SupCon) -- sharpens boundaries between confusable classes
-  contrastive: 0.0        # weight (0 = off; try 0.1-0.5)
-  contrastive_temp: 0.1
-  contrastive_queue: 512  # feature memory queue (needed since batch is small)
-  work_dir: "./work_dir"
-
+  num_workers: 8
+  amp: true
+  augment: true                       # flips + intensity jitter on train
+  early_stop_patience: 20
+  focal_gamma: 2.0
+  mask_noise: 0.5                     # p(perturb the mask) on train when mask_source != none
+  supcon: 0.0                         # supervised-contrastive weight (0 = off; 0.1-0.3 helped before)
+  supcon_temp: 0.1
+  supcon_queue: 512

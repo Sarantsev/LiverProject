@@ -13,7 +13,7 @@ class TumorClassificationHead(nn.Module):
         hidden_dim: int = 256,
         dropout: float = 0.3,
         pool: str = "masked",          # "masked" | "gap"
-        extra_feat_dim: int = 0,       # size of external features (radiomics); 0 = none
+        extra_feat_dim: int = 0,       # size of the clinical/tabular vector (early fusion); 0 = none
         proj_dim: int = 128,           # projection dim for supervised contrastive loss
     ):
         super().__init__()

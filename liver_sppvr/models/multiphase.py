@@ -70,23 +70,29 @@ class PhaseFusion(nn.Module):
         return self.stem(phases)
 
     # --- attention / cross_attention modes ---
-    def fuse_embeddings(self, phase_embeddings: torch.Tensor):
-        """phase_embeddings: (B, P, C, d, h, w) -> (fused (B, C, d, h, w), phase_weights (B, P))."""
+    def fuse_embeddings(self, phase_embeddings: torch.Tensor, phase_present=None):
+        """phase_embeddings: (B, P, C, d, h, w) -> (fused (B, C, d, h, w), phase_weights (B, P)).
+
+        phase_present: optional (B, P) 1/0 -- padded (absent) phases get zero weight and
+        are excluded as attention keys, so a missing phase never contaminates the fusion.
+        """
         if self.mode == "attention":
-            return self._fuse_attention(phase_embeddings)
+            return self._fuse_attention(phase_embeddings, phase_present)
         if self.mode == "cross_attention":
-            return self._fuse_cross_attention(phase_embeddings)
+            return self._fuse_cross_attention(phase_embeddings, phase_present)
         raise RuntimeError("fuse_embeddings requires 'attention' or 'cross_attention' mode.")
 
-    def _fuse_attention(self, phase_embeddings: torch.Tensor):
+    def _fuse_attention(self, phase_embeddings: torch.Tensor, phase_present=None):
         b, p, c, d, h, w = phase_embeddings.shape
         gap = phase_embeddings.flatten(3).mean(-1)        # (B, P, C)
         scores = self.score(gap).squeeze(-1)              # (B, P)
+        if phase_present is not None:
+            scores = scores.masked_fill(phase_present < 0.5, float("-inf"))
         weights = F.softmax(scores, dim=1)                # (B, P)
         fused = (phase_embeddings * weights[:, :, None, None, None, None]).sum(1)
         return fused, weights
 
-    def _fuse_cross_attention(self, phase_embeddings: torch.Tensor):
+    def _fuse_cross_attention(self, phase_embeddings: torch.Tensor, phase_present=None):
         b, p, c, d, h, w = phase_embeddings.shape
         n = d * h * w
         # (B,P,C,d,h,w) -> (B*N, P, C): each spatial token is a length-P sequence of phases
@@ -95,6 +101,9 @@ class PhaseFusion(nn.Module):
         qkv = self.qkv(x).reshape(b * n, p, 3, self.n_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 3, 1, 4)              # each (B*N, heads, P, head_dim)
         attn = (q @ k.transpose(-2, -1)) * (self.head_dim ** -0.5)  # (B*N, heads, P, P)
+        if phase_present is not None:                     # absent phases are not valid keys
+            key_ok = phase_present.repeat_interleave(n, dim=0)[:, None, None, :] > 0.5
+            attn = attn.masked_fill(~key_ok, float("-inf"))
         attn = attn.softmax(dim=-1)
         out = (attn @ v).transpose(1, 2).reshape(b * n, p, c)       # (B*N, P, C)
         out = self.out_proj(out)

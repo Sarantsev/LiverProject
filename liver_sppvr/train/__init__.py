@@ -1,3 +1,3 @@
-from .losses import dice_bce_loss, focal_ce_loss, MultiTaskLoss
+from .losses import ClsLoss, focal_ce_loss, supcon_loss
 
-__all__ = ["dice_bce_loss", "focal_ce_loss", "MultiTaskLoss"]
+__all__ = ["ClsLoss", "focal_ce_loss", "supcon_loss"]
