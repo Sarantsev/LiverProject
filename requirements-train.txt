@@ -27,3 +27,9 @@ pyyaml
 # --- утилиты ---
 tqdm==4.68.2
 tensorboardX==2.6.5
+
+# --- environments (see README) ---
+# * This file = segvol_env (torch 1.13 / monai 0.9): the whole repo, incl. the vendored Merlin
+#   image tower (weights via huggingface_hub; the merlin-vlm package is NOT needed and would
+#   require torch>=2.1 / monai>=1.3).
+# * nnU-Net v2 needs torch>=2 -> its own venv, created by `scripts/run_nnunet.sh setup`.

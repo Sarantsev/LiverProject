@@ -25,3 +25,10 @@ work_dir/
 *.swp
 .idea/
 .vscode/
+
+# nnU-Net (Stage A) + run outputs -- generated on the GPU box
+nnUNet_raw/
+nnUNet_preprocessed/
+nnUNet_results/
+nnunet_env/
+work/

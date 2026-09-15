@@ -43,38 +43,15 @@ from liver_sppvr.data.clinical import feat_dim, load_clinical
 from liver_sppvr.data.dataset import load_pred_masks
 from liver_sppvr.train.build import (build_classifier, class_weights, load_config,
                                      make_scheduler, set_seed)
+from liver_sppvr.train.engine import evaluate, forward_batch
 from liver_sppvr.train.losses import ClsLoss
-from liver_sppvr.train.metrics import cls_metrics, print_per_class, save_confusion, write_summary
+from liver_sppvr.train.metrics import print_per_class, save_confusion, write_summary
 from liver_sppvr.train.splits import (dump_splits, labels_from_manifest, make_kfold_splits,
                                       stratified_patient_split)
 from liver_sppvr.utils.device import resolve_device
 
 MODELS = (*BASELINES, "ours")
 MASK_SOURCES = ("none", "gt", "pred")
-
-
-def _forward(model, batch, device, *, use_mask: bool, want_proj: bool):
-    kw = dict(phases=batch["phases"].to(device), phase_present=batch["phase_present"].to(device))
-    if batch.get("clinical") is not None:
-        kw["extra_feat"] = batch["clinical"].to(device)
-    if use_mask:
-        kw["mask"] = batch["mask"].to(device)
-    if want_proj:
-        kw["return_proj"] = True
-    return model(**kw)
-
-
-@torch.no_grad()
-def evaluate(model, loader, device, num_classes: int, *, use_mask: bool) -> dict:
-    model.eval()
-    y_true, y_pred, y_prob = [], [], []
-    for batch in loader:
-        logits = _forward(model, batch, device, use_mask=use_mask, want_proj=False)
-        probs = torch.softmax(logits.float(), dim=1)
-        y_prob.extend(probs.cpu().tolist())
-        y_pred.extend(probs.argmax(1).cpu().tolist())
-        y_true.extend(batch["label"].tolist())
-    return cls_metrics(y_true, y_pred, y_prob, num_classes)
 
 
 def train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, work_dir, *,
@@ -144,7 +121,7 @@ def train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, work_d
             y = batch["label"].to(device)
             optimizer.zero_grad()
             with torch.cuda.amp.autocast(enabled=use_amp):
-                out = _forward(model, batch, device, use_mask=use_mask, want_proj=supcon > 0)
+                out = forward_batch(model, batch, device, use_mask=use_mask, want_proj=supcon > 0)
                 logits, proj = out if isinstance(out, tuple) else (out, None)
                 losses = loss_fn(logits, y, proj)
                 loss = losses["loss"]
