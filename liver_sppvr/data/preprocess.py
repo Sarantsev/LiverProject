@@ -107,14 +107,59 @@ def _crop_fraction(arr: np.ndarray, frac_box: "FracBox") -> np.ndarray:
     return arr[d0:d1, h0:h1, w0:w1]
 
 
+def _spacing_dhw(zooms) -> tuple:
+    """nibabel zooms are per native axis (H,W,D order in _load_nifti_dhw) -> (D,H,W) mm."""
+    return (float(zooms[2]), float(zooms[0]), float(zooms[1]))
+
+
+def _resample_to_spacing(t: torch.Tensor, zooms, spacing, mode: str) -> torch.Tensor:
+    """t (1,1,D,H,W) at native `zooms` -> the same volume at `spacing` (D,H,W mm)."""
+    cur = _spacing_dhw(zooms)
+    size = [max(1, int(round(n * c / s))) for n, c, s in zip(t.shape[-3:], cur, spacing)]
+    if mode == "nearest":
+        return F.interpolate(t, size=size, mode="nearest")
+    return F.interpolate(t, size=size, mode=mode, align_corners=False)
+
+
+def _box_center(frac_box, shape):
+    """Fractional box -> its centre as a voxel index in a (D,H,W) grid; None -> None (middle)."""
+    if frac_box is None:
+        return None
+    d0, h0, w0, d1, h1, w1 = frac_box
+    return [int(round(0.5 * (a + b) * n)) for a, b, n in zip((d0, h0, w0), (d1, h1, w1), shape)]
+
+
+def _window(t: torch.Tensor, size, center=None) -> torch.Tensor:
+    """Zero-pad / crop t (1,1,D,H,W) to `size` around `center` (voxel index; None = middle).
+    Replica of Merlin's SpatialPad+CenterSpatialCrop / MaskCenterCrop."""
+    D, H, W = t.shape[-3:]
+    center = [n // 2 for n in (D, H, W)] if center is None else [int(c) for c in center]
+    out = t.new_zeros((1, 1, *size))
+    for_src, for_dst = [], []
+    for c, n, s in zip(center, (D, H, W), size):
+        start = c - s // 2
+        src0, src1 = max(start, 0), min(start + s, n)
+        dst0 = src0 - start
+        for_src.append(slice(src0, src1)); for_dst.append(slice(dst0, dst0 + (src1 - src0)))
+    out[(slice(None), slice(None), *for_dst)] = t[(slice(None), slice(None), *for_src)]
+    return out
+
+
 def load_ct(
     path: str,
     hu_window: Sequence[float] = (-175, 250),
     spatial_size: Sequence[int] = (32, 256, 256),
-    frac_box: "FracBox | None" = None,   # crop by a fractional box (tumor/body) before resize
+    frac_box: "FracBox | None" = None,   # ROI: crop+resize (spacing=None) or window centre (spacing set)
     normalize: str = "hu",               # 'foreground' (SegVol) | 'hu' ([0,1] window)
+    spacing: "Sequence[float] | None" = None,   # (D,H,W) mm -> fixed-spacing, fixed-window mode
 ) -> torch.Tensor:
     """Return a (1, D, H, W) tensor, normalized and resampled.
+
+    spacing=None (SegVol): normalize -> crop by frac_box -> resize to spatial_size (anisotropic
+        stretch, as SegVol was pretrained).
+    spacing set (Merlin): normalize -> resample the whole volume to `spacing` -> zero-pad/crop a
+        `spatial_size` window centred on the frac_box centre (or the volume centre). No stretch;
+        this is Merlin's SpatialPad+CenterSpatialCrop / MaskCenterCrop recipe.
 
     Order as in SegVol: normalize on the FULL volume -> crop by frac_box -> resize.
     normalize='foreground' -- SegVol.ForegroundNorm z-score (the encoder was trained on it);
@@ -122,13 +167,17 @@ def load_ct(
     If frac_box is given, crop the region (tumor for zoom-in / body for CropForeground) in
     NATIVE resolution, then resample the crop to spatial_size.
     """
-    arr, _ = _load_nifti_dhw(path)
+    arr, zooms = _load_nifti_dhw(path)
     if normalize == "foreground":
         arr = foreground_norm(arr)                 # z-score over the whole volume (SegVol)
     else:  # hu
         lo, hi = float(hu_window[0]), float(hu_window[1])
         arr = np.clip(arr, lo, hi)
         arr = (arr - lo) / (hi - lo + 1e-8)
+    if spacing is not None:
+        t = torch.from_numpy(np.ascontiguousarray(arr)).float()[None, None]
+        t = _resample_to_spacing(t, zooms, spacing, "trilinear")
+        return _window(t, tuple(spatial_size), _box_center(frac_box, t.shape[-3:]))[0]
     if frac_box is not None:
         arr = _crop_fraction(arr, frac_box)        # crop AFTER normalization (norm -> crop -> resize)
     t = torch.from_numpy(np.ascontiguousarray(arr)).float()[None, None]  # (1,1,D,H,W)
@@ -140,10 +189,16 @@ def load_mask(
     path: str,
     spatial_size: Sequence[int] = (32, 256, 256),
     frac_box: "FracBox | None" = None,
+    spacing: "Sequence[float] | None" = None,
 ) -> torch.Tensor:
-    """Return a binary mask (1, D, H, W), resampled with nearest-neighbor interpolation."""
-    arr, _ = _load_nifti_dhw(path)
+    """Return a binary mask (1, D, H, W), resampled with nearest-neighbor interpolation.
+    Same two modes as load_ct so image and mask stay voxel-aligned."""
+    arr, zooms = _load_nifti_dhw(path)
     arr = (arr > 0).astype(np.float32)
+    if spacing is not None:
+        t = torch.from_numpy(np.ascontiguousarray(arr)).float()[None, None]
+        t = _resample_to_spacing(t, zooms, spacing, "nearest")
+        return _window(t, tuple(spatial_size), _box_center(frac_box, t.shape[-3:]))[0]
     if frac_box is not None:
         arr = _crop_fraction(arr, frac_box)
     t = torch.from_numpy(np.ascontiguousarray(arr)).float()[None, None]

@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import pytest
+import torch
 
 from liver_sppvr.data import (MultiPhaseLiverDataset, build_manifest, collate_multiphase,
                               load_manifest, load_pred_masks)
@@ -93,6 +94,29 @@ def test_pred_mask_override_roi_noise_and_clinical():
         with pytest.raises(KeyError):                          # strict: no silent GT fallback
             MultiPhaseLiverDataset(man, class_names=CLASSES, phases=PHASES, spatial_size=SPATIAL,
                                    mask_override={pids[0]: rows[0][1]})
+
+
+def test_spacing_window_mode_keeps_image_and_mask_aligned():
+    """Fixed-spacing + fixed-window loading (Merlin recipe): no stretch, zero pad, mask aligned."""
+    import nibabel as nib
+    from liver_sppvr.data.preprocess import load_ct, load_mask, bbox_fraction_from_mask
+    with tempfile.TemporaryDirectory() as tmp:
+        arr = np.random.rand(40, 40, 16) * 2000 - 1000            # native (H,W,D), zooms 1,1,2 mm
+        m = np.zeros((40, 40, 16)); m[10:20, 10:20, 4:8] = 1
+        aff = np.diag([1.0, 1.0, 2.0, 1.0])
+        ip, mp = os.path.join(tmp, "i.nii.gz"), os.path.join(tmp, "m.nii.gz")
+        nib.save(nib.Nifti1Image(arr.astype(np.float32), aff), ip)
+        nib.save(nib.Nifti1Image(m.astype(np.float32), aff), mp)
+        box = bbox_fraction_from_mask(mp, margin=0.0)
+        kw = dict(spatial_size=(24, 32, 32), frac_box=box, spacing=(1.0, 1.0, 1.0))
+        img = load_ct(ip, hu_window=(-1000, 1000), normalize="hu", **kw)
+        msk = load_mask(mp, **kw)
+        assert img.shape == (1, 24, 32, 32) and msk.shape == (1, 24, 32, 32)
+        assert 0.0 <= img.min() and img.max() <= 1.0
+        assert msk.sum() > 0 and set(msk.unique().tolist()) <= {0.0, 1.0}
+        # the window is centred on the tumour: its centroid sits near the window centre
+        idx = msk[0].nonzero().float().mean(0)
+        assert (idx - torch.tensor([12.0, 16.0, 16.0])).abs().max() < 2.5
 
 
 if __name__ == "__main__":

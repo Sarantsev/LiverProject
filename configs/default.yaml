@@ -44,11 +44,13 @@ segvol:                               # BAAI/SegVol ViT-B via HF (trust_remote_c
     alpha: 32                         # keep alpha = 2*rank
     dropout: 0.05
     targets: [qkv, out_proj, linear1, linear2]   # attention + MLP; expect "DORA: wrapped ~48"
-merlin:                               # Stanford Merlin I3D-ResNet-152 (pip merlin-vlm, HF stanfordmimi/Merlin)
-  spatial_size: [160, 224, 224]       # (D,H,W): 3 mm slices / 1.5 mm in-plane, as pretrained
-  normalize: hu
+merlin:                               # Stanford Merlin I3D-ResNet-152; weights from HF stanfordmimi/Merlin
+  spatial_size: [160, 224, 224]       # (D,H,W) window at fixed spacing (zero pad / crop), as pretrained
+  spacing: [3.0, 1.5, 1.5]            # (D,H,W) mm: 3 mm slices / 1.5 mm in-plane, as pretrained
   hu_window: [-1000, 1000]            # HU -> [0,1], as pretrained
-  partial_targets: [layer4]           # finetune=partial: unfreeze the last ResNet stage (+ head)
+  features: contrastive               # contrastive (512-d CLIP-projected map) | layer4 (2048-d)
+  partial_targets: [layer4, contrastive_head]   # finetune=partial: last stage + projection
+  checkpoint: ""                      # optional local .pt (else auto-download from HF)
 
 # --- Training ---
 train:

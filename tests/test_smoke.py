@@ -142,6 +142,27 @@ def test_build_classifier_config_wiring(monkeypatch):
     assert not m.backbone.net[0].weight.requires_grad
 
 
+def test_merlin_encoder_random_init_forward_and_partial():
+    """Vendored I3D-ResNet-152 builds from the torchvision skeleton, runs on (B,1,D,H,W),
+    and exposes layer4/contrastive_head for finetune=partial. (No weights downloaded.)"""
+    import torchvision
+    from liver_sppvr.models.merlin import I3ResNetEncoder, MerlinBackbone
+    enc = I3ResNetEncoder(torchvision.models.resnet152(weights=None), features="contrastive")
+    bb = MerlinBackbone(enc, spatial_size=(16, 64, 64))
+    assert bb.embed_dim == 512 and bb.preprocess_spec["spacing"] == (3.0, 1.5, 1.5)
+    bb.eval()
+    with torch.no_grad():
+        fmap = bb(torch.rand(1, 1, 16, 64, 64))
+    assert fmap.shape == (1, 512, 1, 2, 2)                       # D/16, H/32, W/32
+    bb.set_finetune("partial", {"partial_targets": ["layer4", "contrastive_head"]})
+    assert enc.layer4[0].conv1.weight.requires_grad and enc.contrastive_head.weight.requires_grad
+    assert not enc.layer3[0].conv1.weight.requires_grad and not enc.conv1.weight.requires_grad
+    # state-dict key layout matches Merlin's image tower (loader strips 'encode_image.i3_resnet.')
+    keys = set(enc.state_dict())
+    assert {"conv1.weight", "bn1.running_mean", "layer4.2.conv3.weight", "contrastive_head.bias"} <= keys
+    assert not any(k.startswith("classifier") for k in keys)
+
+
 if __name__ == "__main__":
     for k, fn in sorted(globals().items()):
         if k.startswith("test_"):

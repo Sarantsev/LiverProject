@@ -40,6 +40,7 @@ class MultiPhaseLiverDataset(Dataset):
         spatial_size: Sequence[int] = (32, 256, 256),
         hu_window: Sequence[float] = (-175, 250),
         normalize: str = "foreground",
+        spacing: Optional[Sequence[float]] = None,     # (D,H,W) mm: fixed-spacing window mode (Merlin)
         patient_ids: Optional[Sequence[str]] = None,
         augment: bool = False,
         roi: str = "body",
@@ -59,6 +60,7 @@ class MultiPhaseLiverDataset(Dataset):
         self.spatial_size = tuple(spatial_size)
         self.hu_window = tuple(hu_window)
         self.normalize = normalize
+        self.spacing = tuple(spacing) if spacing else None
         self.augment = augment
         self.roi, self.roi_margin = roi, roi_margin
         self.mask_override = mask_override
@@ -107,11 +109,11 @@ class MultiPhaseLiverDataset(Dataset):
             if path is None:
                 tensors.append(torch.zeros(1, d, h, w)); present.append(0.0)
             else:
-                tensors.append(load_ct(path, self.hu_window, self.spatial_size,
-                                       frac_box=frac_box, normalize=self.normalize))
+                tensors.append(load_ct(path, self.hu_window, self.spatial_size, frac_box=frac_box,
+                                       normalize=self.normalize, spacing=self.spacing))
                 present.append(1.0)
         phases = torch.stack(tensors, dim=0)                        # (P,1,D,H,W)
-        mask = load_mask(rec["mask_path"], self.spatial_size, frac_box=frac_box)   # (1,D,H,W)
+        mask = load_mask(rec["mask_path"], self.spatial_size, frac_box=frac_box, spacing=self.spacing)
 
         if self.augment:
             from .augment import augment_multiphase, perturb_mask

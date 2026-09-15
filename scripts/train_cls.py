@@ -109,7 +109,7 @@ def train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, work_d
     override = pred_masks if (use_mask and args.mask_source == "pred") else None
     common = dict(class_names=cfg["classifier"]["class_names"], phases=phases,
                   spatial_size=spec["spatial_size"], hu_window=spec["hu_window"],
-                  normalize=spec["normalize"], roi=roi, roi_margin=pcfg.get("roi_margin", 0.5),
+                  normalize=spec["normalize"], spacing=spec.get("spacing"), roi=roi, roi_margin=pcfg.get("roi_margin", 0.5),
                   mask_override=override, clinical=clinical)
     train_ds = MultiPhaseLiverDataset(man, patient_ids=tr_ids, augment=tcfg.get("augment", False),
                                       mask_noise=(args.mask_noise if use_mask else 0.0), **common)
