@@ -26,6 +26,7 @@ Then train, e.g.:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 
 FEATURES = ["clin_sex", "clin_age", "clin_cirrhosis", "clin_hepatitis", "clin_chemo"]
@@ -49,11 +50,24 @@ def _sex(v):
     return float("nan")
 
 
+# DICOM Age String (VR "AS") units -> years
+_AGE_UNITS = {"y": 1.0, "m": 1.0 / 12.0, "w": 1.0 / 52.1775, "d": 1.0 / 365.25}
+
+
 def _age(v):
-    try:
-        return float(str(v).strip())
-    except ValueError:
+    """Age in YEARS from either a plain number ("42") or a DICOM Age String ("062Y").
+
+    meta_info_patient.csv mixes both formats: ~15% of rows are plain integers and the
+    rest are zero-padded DICOM AS values with a unit suffix, which float() rejects --
+    silently NaN-ing 85% of the ages.
+    """
+    s = str(v).strip()
+    if not s or s.lower() in ("nan", "none", "na", "-"):
         return float("nan")
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([ymwd])?", s, flags=re.IGNORECASE)
+    if not m:
+        return float("nan")
+    return float(m.group(1)) * _AGE_UNITS[(m.group(2) or "y").lower()]
 
 
 def main() -> int:
@@ -120,6 +134,10 @@ def main() -> int:
           f"(matched {matched}, unmatched-in-meta {unmatched}, manifest patients {len(full_ids)})")
     # quick sanity: how many NaNs per feature (loader will zero them)
     print("  NaNs per feature:", {f: int(out[f].isna().sum()) for f in FEATURES})
+    age = out["clin_age"].dropna()
+    if len(age):
+        print(f"  clin_age: n={len(age)} min={age.min():.0f} median={age.median():.0f} "
+              f"max={age.max():.0f}  (sanity-check these look like adult years)")
 
     return 0
 
