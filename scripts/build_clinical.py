@@ -75,19 +75,29 @@ def main() -> int:
         bare_to_full.setdefault(bare, fid)          # first wins (ids are unique anyway)
 
     meta = pd.read_csv(args.meta)
-    # tolerant column lookup (exact names from meta_info_patient.csv)
+
+    # Tolerant column lookup: meta_info_patient.csv uses names like "Cirrhosis status (Y/N)".
+    def _find(*needles) -> str:
+        for c in meta.columns:
+            if any(n in c.lower() for n in needles):
+                return c
+        raise SystemExit(f"{args.meta}: no column matching {needles}. "
+                         f"Columns present: {list(meta.columns)}")
+
     col = {c.lower(): c for c in meta.columns}
     c_id = col.get("id", "ID")
     c_type = col.get("type", "type")
-    c_sex = col["patient_sex"]
-    c_age = col["patient_age"]
-    c_cirr = next(c for c in meta.columns if c.lower().startswith("cirrhosis"))
-    c_hep = next(c for c in meta.columns if "hepatitis" in c.lower())
-    c_chemo = next(c for c in meta.columns if "chemotherapy" in c.lower())
+    c_sex = _find("patient_sex", "sex")
+    c_age = _find("patient_age", "age")
+    c_cirr = _find("cirrhosis")
+    c_hep = _find("hepatitis")
+    c_chemo = _find("chemotherapy", "chemo")
 
     rows, matched, unmatched = [], 0, 0
-    for r in meta.itertuples(index=False):
-        d = r._asdict()
+    # to_dict("records") keeps the ORIGINAL column names. itertuples() would rename any
+    # column that is not a valid Python identifier ("Cirrhosis status (Y/N)" -> "_3"),
+    # so looking it up by its real name raised KeyError.
+    for d in meta.to_dict("records"):
         bare = str(d[c_id]).strip()
         fid = bare_to_full.get(bare)
         if fid is None:
