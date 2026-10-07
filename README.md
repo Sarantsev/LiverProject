@@ -29,7 +29,9 @@ The 5 published baselines (H-LSTM, STIC, SDR-Former, LCA-Net, RA-CMFormer) are r
   z-scored on the training fold only.
 
 ## Environments
-* `segvol_env` (torch 1.13, monai 0.9, transformers 4.30) — everything in this repo. `requirements-train.txt`.
+* `segvol_env` (torch 1.13, monai 0.9, transformers 4.30) — everything in this repo; `requirements-train.txt`,
+  created by `scripts/setup_env.sh`. Its location differs per machine: `segvol_env/bin/python` on the GPU box
+  (inside the project), `../segvol_env/bin/python` on the dev laptop. `$PY` below = whichever applies.
 * `nnunet_env` (torch ≥ 2, `nnunetv2`) — **only** nnU-Net; created by `scripts/run_nnunet.sh setup`.
 * Merlin weights are downloaded from HF `stanfordmimi/Merlin`; the image tower is vendored in
   `liver_sppvr/models/merlin.py` (no `merlin-vlm` install needed).
@@ -78,4 +80,4 @@ liver_sppvr/
 scripts/     prepare_mct, build_manifest, build_clinical | export_nnunet, run_nnunet.sh | train_cls | infer_cascade
 configs/default.yaml   tests/   docs/ (references, methods, diary)
 ```
-Tests (CPU, synthetic data): `../segvol_env/bin/python -m pytest tests -q`.
+Tests (CPU, synthetic data): `$PY -m pytest tests -q` -> 14 passed.

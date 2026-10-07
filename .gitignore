@@ -5,10 +5,11 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 
-# Virtual envs
+# Virtual envs (the GPU box keeps segvol_env INSIDE the project dir)
 .venv/
 venv/
 env/
+segvol_env/
 
 # Training artifacts / checkpoints
 work_dir/
