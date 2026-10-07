@@ -49,7 +49,13 @@ merlin:                               # Stanford Merlin I3D-ResNet-152; weights 
   spacing: [3.0, 1.5, 1.5]            # (D,H,W) mm: 3 mm slices / 1.5 mm in-plane, as pretrained
   hu_window: [-1000, 1000]            # HU -> [0,1], as pretrained
   features: contrastive               # contrastive (512-d CLIP-projected map) | layer4 (2048-d)
-  partial_targets: [layer4, contrastive_head]   # finetune=partial: last stage + projection
+  partial_targets: [layer4.2, contrastive_head]  # finetune=partial: which params to unfreeze.
+                                      # Capacity, not depth, is the binding constraint here: only 412
+                                      # training patients per fold, and on this data a reduced-capacity
+                                      # DoRA already matched the full one. Trainable params per choice:
+                                      #   [contrastive_head]            1.0M  (closest to DoRA's 2.44M)
+                                      #   [layer4.2, contrastive_head] 10.2M  (default)
+                                      #   [layer4, contrastive_head]   30.2M  (12x SegVol -> overfit risk)
   checkpoint: ""                      # optional local .pt (else auto-download from HF)
 
 # --- Training ---
