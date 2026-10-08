@@ -163,6 +163,32 @@ def test_merlin_encoder_random_init_forward_and_partial():
     assert not any(k.startswith("classifier") for k in keys)
 
 
+def test_merlin_freezes_batchnorm_running_stats():
+    """freeze_bn must keep every BatchNorm in eval mode and leave its pretrained running
+    stats untouched by a train-mode forward. Without this, batch-1-per-GPU training
+    overwrites them with noise and the classifier collapses onto one class."""
+    import torchvision
+    from liver_sppvr.models.merlin import I3ResNetEncoder, MerlinBackbone
+    enc = I3ResNetEncoder(torchvision.models.resnet152(weights=None))
+    bb = MerlinBackbone(enc, spatial_size=(16, 64, 64))
+    bns = [m for m in bb.modules() if isinstance(m, nn.modules.batchnorm._BatchNorm)]
+    assert len(bns) > 100, len(bns)                       # ResNet-152 has many
+
+    bb.train()                                            # the whole point: train() must not un-freeze
+    assert bb.training and all(not m.training for m in bns)
+    before = [m.running_mean.clone() for m in bns]
+    x = torch.rand(1, 1, 16, 64, 64)
+    x.requires_grad_(True)                                # exercise the checkpointed path too
+    bb(x).sum().backward()
+    assert all(torch.equal(m.running_mean, b) for m, b in zip(bns, before))
+
+    # and the opt-out still behaves like a normal ResNet
+    bb2 = MerlinBackbone(I3ResNetEncoder(torchvision.models.resnet152(weights=None)),
+                         spatial_size=(16, 64, 64), freeze_bn=False).train()
+    assert all(m.training for m in bb2.modules()
+               if isinstance(m, nn.modules.batchnorm._BatchNorm))
+
+
 if __name__ == "__main__":
     for k, fn in sorted(globals().items()):
         if k.startswith("test_"):

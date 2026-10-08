@@ -49,6 +49,9 @@ merlin:                               # Stanford Merlin I3D-ResNet-152; weights 
   spacing: [3.0, 1.5, 1.5]            # (D,H,W) mm: 3 mm slices / 1.5 mm in-plane, as pretrained
   hu_window: [-1000, 1000]            # HU -> [0,1], as pretrained
   features: contrastive               # contrastive (512-d CLIP-projected map) | layer4 (2048-d)
+  freeze_bn: true                     # keep BatchNorm in eval mode: it is a ResNet, and at
+                                      # batch 1-2 per GPU train-mode BN overwrites the pretrained
+                                      # running stats with noise and the model collapses
   partial_targets: [layer4.2, contrastive_head]  # finetune=partial: which params to unfreeze.
                                       # Capacity, not depth, is the binding constraint here: only 412
                                       # training patients per fold, and on this data a reduced-capacity

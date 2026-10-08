@@ -101,16 +101,47 @@ class I3ResNetEncoder(nn.Module):
 # ---------------------------------- backbone ----------------------------------
 class MerlinBackbone(Backbone):
     def __init__(self, encoder: I3ResNetEncoder, spatial_size: Sequence[int] = (160, 224, 224),
-                 spacing: Sequence[float] = (3.0, 1.5, 1.5), hu_window: Sequence[float] = (-1000, 1000)):
+                 spacing: Sequence[float] = (3.0, 1.5, 1.5), hu_window: Sequence[float] = (-1000, 1000),
+                 freeze_bn: bool = True):
         super().__init__()
         self.i3_resnet = encoder
         self.embed_dim = encoder.out_dim
+        self.freeze_bn = freeze_bn
         self.preprocess_spec = {"spatial_size": tuple(spatial_size), "spacing": tuple(spacing),
                                 "normalize": "hu", "hu_window": tuple(hu_window)}
 
     @property
     def encoder(self) -> nn.Module:
         return self.i3_resnet
+
+    def train(self, mode: bool = True):
+        """Keep BatchNorm in eval mode while finetuning (freeze_bn, the default).
+
+        This backbone is a ResNet. In train mode every BatchNorm3d normalises by the
+        statistics of the current batch AND overwrites its pretrained running_mean /
+        running_var -- those are buffers, so requires_grad=False does NOT protect them and
+        even the frozen stages are affected. Our batch is 2 split over 2 GPUs, i.e. ONE
+        volume per BatchNorm call, so those statistics are pure noise and the pretrained
+        features are destroyed within the first epoch: the classifier then collapses onto a
+        single class (observed: HH sens 1.00 / spec 0.39, every other class sens ~0.1,
+        while the AUCs stayed high -- ranking survived, decisions did not).
+
+        Freezing BN is the standard way to finetune a convolutional backbone at small batch
+        size. SegVol needs none of this: it is a ViT with LayerNorm, which is
+        batch-independent -- which is why only this backbone collapsed.
+        """
+        super().train(mode)
+        if mode and self.freeze_bn:
+            n = 0
+            for m in self.modules():
+                if isinstance(m, nn.modules.batchnorm._BatchNorm):
+                    m.eval()
+                    n += 1
+            if not getattr(self, "_bn_frozen_logged", False):
+                print(f"Merlin: BatchNorm frozen in eval mode ({n} layers) -- pretrained "
+                      f"running stats preserved")
+                self._bn_frozen_logged = True
+        return self
 
     def forward(self, x):
         return self.i3_resnet(x)
@@ -132,4 +163,5 @@ class MerlinBackbone(Backbone):
             raise RuntimeError(f"Merlin image tower mismatch: missing={missing[:5]} unexpected={unexpected[:5]}")
         print(f"Merlin: loaded {len(sub)} image-tower tensors from {path}")
         return cls(enc, spatial_size=m_cfg["spatial_size"], spacing=m_cfg["spacing"],
-                   hu_window=m_cfg.get("hu_window", (-1000, 1000)))
+                   hu_window=m_cfg.get("hu_window", (-1000, 1000)),
+                   freeze_bn=m_cfg.get("freeze_bn", True))
