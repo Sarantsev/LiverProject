@@ -33,3 +33,6 @@ nnUNet_preprocessed/
 nnUNet_results/
 nnunet_env/
 work/
+
+# Working notes, bibliography, results summaries -- kept locally, not published
+docs/
