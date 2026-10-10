@@ -31,11 +31,38 @@ mkdir -p "$nnUNet_raw" "$nnUNet_preprocessed" "$nnUNet_results" "$WORK"
 cmd="${1:-help}"
 case "$cmd" in
   setup)
-    python3 -m venv "$NNENV"
-    "$NNENV/bin/pip" install -U pip wheel
-    "$NNENV/bin/pip" install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-    "$NNENV/bin/pip" install nnunetv2
+    # Prefer python3.10: it is the version the rest of the project is proven on, and some
+    # nnU-Net dependencies still lack wheels for very new interpreters.
+    PYBIN="${PYBIN:-}"
+    if [ -z "$PYBIN" ]; then
+      for c in python3.11 python3.10 python3; do
+        command -v "$c" >/dev/null 2>&1 && { PYBIN="$c"; break; }
+      done
+    fi
+    echo "interpreter: $PYBIN ($("$PYBIN" --version 2>&1))"
+    [ -d "$NNENV" ] && echo "note: $NNENV exists; reusing it (rm -rf it to start clean)"
+    "$PYBIN" -m venv "$NNENV" 2>/dev/null || true
+    # The GPU box has a flaky link to PyPI -> retry hard, and never abort on the pip bump.
+    PIPFLAGS="--retries 10 --timeout 120"
+    # shellcheck disable=SC2086
+    "$NNENV/bin/pip" install $PIPFLAGS -U pip wheel || echo "pip bump failed -- continuing"
+    # shellcheck disable=SC2086
+    "$NNENV/bin/pip" install $PIPFLAGS torch torchvision --index-url https://download.pytorch.org/whl/cu121
+    # shellcheck disable=SC2086
+    "$NNENV/bin/pip" install $PIPFLAGS nnunetv2
     "$NNENV/bin/python" -c "import torch, nnunetv2; print('torch', torch.__version__, '| cuda', torch.cuda.is_available())"
+    # Which shortened-schedule trainers this nnU-Net build actually ships (the default
+    # nnUNetTrainer runs 1000 epochs per fold, which is far too slow here).
+    "$NNENV/bin/python" - <<'PY'
+import os, nnunetv2.training.nnUNetTrainer as t
+names = set()
+for root, _, files in os.walk(os.path.dirname(t.__file__)):
+    for f in files:
+        if f.startswith("nnUNetTrainer") and f.endswith(".py"):
+            names.add(f[:-3])
+epochs = sorted(n for n in names if "poch" in n)
+print("trainers with a shortened schedule:", epochs or "(none found -- use TRAINER=nnUNetTrainer)")
+PY
     ;;
   export)
     cd "$ROOT" && PYTHONPATH=. "$SEGVOL_PY" scripts/export_nnunet.py --config configs/default.yaml \
