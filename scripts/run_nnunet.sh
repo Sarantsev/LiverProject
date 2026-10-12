@@ -24,7 +24,13 @@ DATASET="Dataset${DATASET_ID}_MCTLiver"
 TRAINER="${TRAINER:-nnUNetTrainer_250epochs}"
 CONFIG="3d_fullres"
 NNENV="${NNENV:-$ROOT/nnunet_env}"
-SEGVOL_PY="${SEGVOL_PY:-$ROOT/../segvol_env/bin/python}"
+# segvol_env sits inside the project on the GPU box and alongside it on the dev laptop.
+SEGVOL_PY="${SEGVOL_PY:-}"
+if [ -z "$SEGVOL_PY" ]; then
+  for c in "$ROOT/segvol_env/bin/python" "$ROOT/../segvol_env/bin/python" "$(command -v python3)"; do
+    [ -x "$c" ] && { SEGVOL_PY="$c"; break; }
+  done
+fi
 WORK="$ROOT/work/segA"
 mkdir -p "$nnUNet_raw" "$nnUNet_preprocessed" "$nnUNet_results" "$WORK"
 
