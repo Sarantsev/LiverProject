@@ -51,11 +51,16 @@ def build_classifier(cfg: dict, device, *, backbone: str | None = None,
     ccfg = cfg["classifier"]
     mp = cfg["multiphase"]
     backbone = backbone or ccfg.get("backbone", "segvol")
-    finetune = finetune or ccfg.get("finetune", "dora")
     mask_source = mask_source or ccfg.get("mask_source", "pred")
     bb = build_backbone(backbone, cfg)
-    ft_cfg = dict(cfg.get(backbone, {}).get("lora", {}))
-    ft_cfg["partial_targets"] = cfg.get(backbone, {}).get("partial_targets")
+    bcfg = cfg.get(backbone, {})
+    # The adaptation mode belongs to the BACKBONE, not to the classifier: DoRA wraps Linear
+    # layers and is impossible on a convolutional encoder, so a single global default would
+    # silently follow --backbone across incompatible models. Resolution order: explicit
+    # argument -> that backbone's config block -> the backbone's own default.
+    finetune = finetune or bcfg.get("finetune") or bb.default_finetune
+    ft_cfg = dict(bcfg.get("lora", {}))
+    ft_cfg["partial_targets"] = bcfg.get("partial_targets")
     bb.set_finetune(finetune, ft_cfg)
     model = LiverTumorClassifier(
         bb, num_classes=ccfg["num_classes"], n_phases=len(mp["phases"]),

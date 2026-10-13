@@ -189,6 +189,37 @@ def test_merlin_freezes_batchnorm_running_stats():
                if isinstance(m, nn.modules.batchnorm._BatchNorm))
 
 
+def test_finetune_mode_follows_the_backbone(monkeypatch):
+    """The adaptation mode must come from the backbone, not from a global classifier default:
+    DoRA wraps nn.Linear and is impossible on a convolutional encoder."""
+    import liver_sppvr.train.build as build
+    from liver_sppvr.models.backbones import Backbone, SegVolViTBackbone
+
+    assert SegVolViTBackbone.default_finetune == "dora"          # ViT -> adapters
+    from liver_sppvr.models.merlin import MerlinBackbone
+    assert MerlinBackbone.default_finetune == "partial"          # conv -> partial unfreeze
+    assert _StubBackbone.default_finetune == Backbone.default_finetune
+
+    # a conv encoder asked for DoRA fails with a message that names the alternative
+    bb = _StubBackbone()
+    assert not any(isinstance(m, nn.Linear) for m in bb.encoder.modules())
+    try:
+        bb.set_finetune("dora", {"targets": ["qkv"]})
+    except ValueError as e:
+        assert "partial" in str(e) and "convolutional" in str(e), str(e)
+    else:
+        raise AssertionError("DoRA on a convolutional encoder must raise")
+
+    # build_classifier takes the mode from the backbone's config block, not classifier.*
+    monkeypatch.setattr(build, "build_backbone", lambda name, cfg: _StubBackbone())
+    cfg = {"classifier": {"backbone": "stub", "mask_source": "none", "num_classes": N_CLASSES,
+                          "hidden_dim": 16, "dropout": 0.1},
+           "multiphase": {"phases": ["a", "b", "c", "d"], "fusion": "attention"},
+           "stub": {"finetune": "partial", "partial_targets": ["2"]}}
+    m = build.build_classifier(cfg, "cpu")
+    assert m.backbone.net[2].weight.requires_grad and not m.backbone.net[0].weight.requires_grad
+
+
 if __name__ == "__main__":
     for k, fn in sorted(globals().items()):
         if k.startswith("test_"):

@@ -25,7 +25,6 @@ preprocess:
 # --- Classifier (ours) ---
 classifier:
   backbone: segvol                    # segvol | merlin -- two pretrained CT encoders compared head-to-head
-  finetune: dora                      # segvol: dora | lora | frozen | full   merlin: partial | frozen | full
   mask_source: pred                   # none (GAP, image-only) | gt (semi-auto upper bound) | pred (fully-auto)
   num_classes: 5
   class_names: [HCC, ICC, CRLM, BCLM, HH]
@@ -34,6 +33,7 @@ classifier:
 
 # --- Backbones ---
 segvol:                               # BAAI/SegVol ViT-B via HF (trust_remote_code); image encoder only
+  finetune: dora                      # dora | lora | frozen | full (a ViT has Linear layers)
   spatial_size: [32, 256, 256]        # fixed by the pretrained positional embeddings
   patch_size: [4, 16, 16]
   embed_dim: 768
@@ -45,6 +45,7 @@ segvol:                               # BAAI/SegVol ViT-B via HF (trust_remote_c
     dropout: 0.05
     targets: [qkv, out_proj, linear1, linear2]   # attention + MLP; expect "DORA: wrapped ~48"
 merlin:                               # Stanford Merlin I3D-ResNet-152; weights from HF stanfordmimi/Merlin
+  finetune: partial                   # partial | frozen | full -- convolutional, DoRA impossible here
   spatial_size: [160, 224, 224]       # (D,H,W) window at fixed spacing (zero pad / crop), as pretrained
   spacing: [3.0, 1.5, 1.5]            # (D,H,W) mm: 3 mm slices / 1.5 mm in-plane, as pretrained
   hu_window: [-1000, 1000]            # HU -> [0,1], as pretrained

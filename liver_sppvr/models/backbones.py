@@ -24,6 +24,7 @@ FINETUNE_MODES = ("frozen", "full", "dora", "lora", "partial")
 
 class Backbone(nn.Module):
     embed_dim: int
+    default_finetune: str = "full"   # adaptation mode that suits THIS encoder
     preprocess_spec: dict          # {"spatial_size": (D,H,W), "normalize": str, "hu_window": (lo,hi)}
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:      # (B,1,D,H,W) -> (B,C,d,h,w)
@@ -42,6 +43,13 @@ class Backbone(nn.Module):
         for p in self.encoder.parameters():
             p.requires_grad_(mode == "full")
         if mode in ("dora", "lora"):
+            # DoRA/LoRA wrap nn.Linear; a convolutional encoder has none.
+            if not any(isinstance(m, nn.Linear) for m in self.encoder.modules()):
+                raise ValueError(
+                    f"finetune={mode!r} needs nn.Linear layers, but {type(self).__name__} has "
+                    f"none (it is convolutional). Use finetune='partial' with partial_targets, "
+                    f"or 'frozen'/'full'. This backbone's default is "
+                    f"{self.default_finetune!r}.")
             from .lora import apply_lora
             n = apply_lora(self.encoder, targets=cfg.get("targets", ["qkv"]),
                            rank=cfg.get("rank", 8), alpha=cfg.get("alpha", 16.0),
@@ -64,6 +72,7 @@ class Backbone(nn.Module):
 # ======================================================================================
 class SegVolViTBackbone(Backbone):
     """SegVol image encoder (MONAI ViT) -> token sequence reshaped to a (d,h,w) grid."""
+    default_finetune = "dora"       # a ViT is full of Linear layers -> low-rank adapters fit
     def __init__(self, image_encoder: nn.Module, roi_size: Sequence[int] = (32, 256, 256),
                  patch_size: Sequence[int] = (4, 16, 16), embed_dim: int = 768,
                  normalize: str = "foreground", hu_window: Sequence[float] = (-175, 250)):

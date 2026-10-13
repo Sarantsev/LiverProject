@@ -100,6 +100,7 @@ class I3ResNetEncoder(nn.Module):
 
 # ---------------------------------- backbone ----------------------------------
 class MerlinBackbone(Backbone):
+    default_finetune = "partial"     # convolutional: no Linear layers for DoRA to wrap
     def __init__(self, encoder: I3ResNetEncoder, spatial_size: Sequence[int] = (160, 224, 224),
                  spacing: Sequence[float] = (3.0, 1.5, 1.5), hu_window: Sequence[float] = (-1000, 1000),
                  freeze_bn: bool = True):
