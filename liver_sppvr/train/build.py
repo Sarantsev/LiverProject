@@ -66,7 +66,9 @@ def build_classifier(cfg: dict, device, *, backbone: str | None = None,
         bb, num_classes=ccfg["num_classes"], n_phases=len(mp["phases"]),
         fusion_mode=mp.get("fusion", "attention"), hidden_dim=ccfg["hidden_dim"],
         dropout=ccfg["dropout"], pool=("gap" if mask_source == "none" else "masked"),
-        extra_feat_dim=clinical_dim)
+        extra_feat_dim=clinical_dim, clinical_hidden=ccfg.get("clinical_hidden", 0))   # absent key = old checkpoint -> raw concat
+    clin_h = ccfg.get("clinical_hidden", 0)
+    clin_desc = f"{clinical_dim}->{clin_h}" if (clinical_dim and clin_h) else str(clinical_dim)
     print(f"classifier: backbone={backbone} finetune={finetune} mask_source={mask_source} "
-          f"clinical_dim={clinical_dim} fusion={mp.get('fusion', 'attention')}")
+          f"clinical={clin_desc} fusion={mp.get('fusion', 'attention')}")
     return model.to(device)

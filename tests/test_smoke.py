@@ -220,6 +220,37 @@ def test_finetune_mode_follows_the_backbone(monkeypatch):
     assert m.backbone.net[2].weight.requires_grad and not m.backbone.net[0].weight.requires_grad
 
 
+def test_clinical_encoder_widens_the_tabular_share():
+    """The tabular vector must be encoded before fusion, not concatenated raw: 5 clinical
+    numbers against a 768-d embedding are 0.6% of the head's input and get ignored.
+    clinical_hidden=0 keeps the old raw concat so pre-existing checkpoints still load."""
+    emb = torch.randn(2, C, d, h, w)
+    extra = torch.randn(2, 5)
+
+    enc = TumorClassificationHead(embed_dim=C, num_classes=N_CLASSES, hidden_dim=16,
+                                  pool="gap", extra_feat_dim=5, clinical_hidden=64)
+    raw = TumorClassificationHead(embed_dim=C, num_classes=N_CLASSES, hidden_dim=16,
+                                  pool="gap", extra_feat_dim=5, clinical_hidden=0)
+    assert enc.clin is not None and raw.clin is None
+    assert enc.mlp[1].in_features == C + 64
+    assert raw.mlp[1].in_features == C + 5
+    assert enc(emb, extra_feat=extra).shape == (B, N_CLASSES)
+    assert raw(emb, extra_feat=extra).shape == (B, N_CLASSES)
+
+    # the clinical pathway actually carries gradient
+    out = enc(emb, extra_feat=extra).sum()
+    out.backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in enc.clin.parameters())
+
+    # and changing the clinical vector changes the prediction
+    enc.eval()
+    with torch.no_grad():
+        v = torch.tensor([[1.0, -0.5, 1.0, 1.0, 0.0], [0.0, 2.0, -1.0, -1.0, 1.0]])
+        a = enc(emb, extra_feat=v)
+        b = enc(emb, extra_feat=-v)
+    assert not torch.allclose(a, b, atol=1e-4)
+
+
 if __name__ == "__main__":
     for k, fn in sorted(globals().items()):
         if k.startswith("test_"):

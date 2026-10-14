@@ -29,6 +29,10 @@ classifier:
   num_classes: 5
   class_names: [HCC, ICC, CRLM, BCLM, HH]
   hidden_dim: 256
+  clinical_hidden: 64                 # the tabular vector gets its own encoder before fusion.
+                                      # 5 clinical numbers concatenated raw to a 768-d image
+                                      # embedding are 0.6% of the input width and get ignored;
+                                      # 0 = raw concat (needed to load pre-2026-10-14 checkpoints)
   dropout: 0.3
 
 # --- Backbones ---

@@ -22,7 +22,8 @@ from .multiphase import PhaseFusion
 class LiverTumorClassifier(nn.Module):
     def __init__(self, backbone: Backbone, num_classes: int = 5, n_phases: int = 4,
                  fusion_mode: str = "attention", hidden_dim: int = 256, dropout: float = 0.3,
-                 pool: str = "masked", extra_feat_dim: int = 0):
+                 pool: str = "masked", extra_feat_dim: int = 0,
+                 clinical_hidden: int = 64):
         super().__init__()
         self.backbone = backbone
         self.n_phases = n_phases
@@ -30,7 +31,8 @@ class LiverTumorClassifier(nn.Module):
                                         embed_dim=backbone.embed_dim)
         self.head = TumorClassificationHead(embed_dim=backbone.embed_dim, num_classes=num_classes,
                                             hidden_dim=hidden_dim, dropout=dropout, pool=pool,
-                                            extra_feat_dim=extra_feat_dim)
+                                            extra_feat_dim=extra_feat_dim,
+                                            clinical_hidden=clinical_hidden)
         # autocast inside forward: with DataParallel the replica threads do not inherit the
         # caller's (thread-local) autocast context, so the trainer sets this flag instead.
         self.amp_in_forward = False

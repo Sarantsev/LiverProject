@@ -14,6 +14,7 @@ class TumorClassificationHead(nn.Module):
         dropout: float = 0.3,
         pool: str = "masked",          # "masked" | "gap"
         extra_feat_dim: int = 0,       # size of the clinical/tabular vector (early fusion); 0 = none
+        clinical_hidden: int = 64,     # width of the tabular encoder; 0 = concatenate raw
         proj_dim: int = 128,           # projection dim for supervised contrastive loss
     ):
         super().__init__()
@@ -22,7 +23,28 @@ class TumorClassificationHead(nn.Module):
         self.pool = pool
         self.extra_feat_dim = extra_feat_dim
 
-        in_dim = embed_dim + extra_feat_dim
+        # Encode the tabular vector before fusing it. Concatenating it raw drowns it: 5
+        # clinical numbers against a 768-d image embedding contribute 0.6% of the input
+        # width, so the head barely learns to use them. (The raw concat was acceptable for
+        # the 88 radiomics features this head was first written for; it is not for 5.)
+        # clinical_hidden=0 restores the raw concat, which old checkpoints need.
+        self.clin = None
+        clin_out = 0
+        if extra_feat_dim > 0 and clinical_hidden > 0:
+            # No LayerNorm on the input: these features are already z-scored per column on
+            # the training fold, and normalising ACROSS them would mix unrelated units
+            # (sex, age, cirrhosis, ...) and cancel exactly the signal we want -- any
+            # constant-valued vector would map to the same output.
+            self.clin = nn.Sequential(
+                nn.Linear(extra_feat_dim, clinical_hidden), nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(clinical_hidden, clinical_hidden), nn.GELU(),
+            )
+            clin_out = clinical_hidden
+        elif extra_feat_dim > 0:
+            clin_out = extra_feat_dim
+
+        in_dim = embed_dim + clin_out
         self.mlp = nn.Sequential(
             nn.LayerNorm(in_dim),
             nn.Linear(in_dim, hidden_dim),
@@ -80,7 +102,8 @@ class TumorClassificationHead(nn.Module):
         if self.extra_feat_dim > 0:
             if extra_feat is None:
                 raise ValueError(f"extra_feat_dim={self.extra_feat_dim} but extra_feat=None.")
-            feat = torch.cat([feat, extra_feat], dim=1)
+            extra = extra_feat.float()
+            feat = torch.cat([feat, self.clin(extra) if self.clin is not None else extra], dim=1)
 
         logits = self.mlp(feat)
         if return_proj:
