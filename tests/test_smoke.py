@@ -251,6 +251,24 @@ def test_clinical_encoder_widens_the_tabular_share():
     assert not torch.allclose(a, b, atol=1e-4)
 
 
+def test_trainer_does_not_override_the_backbone_finetune_mode():
+    """The CLI must pass finetune=None through when the user did not ask for a mode, so the
+    backbone resolves it. A default resolved in the trainer silently sent 'dora' to a
+    convolutional encoder and crashed the run."""
+    import ast, pathlib as _p
+    src = _p.Path("scripts/train_cls.py").read_text()
+    tree = ast.parse(src)
+    # no statement may assign a fallback to args.finetune
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Attribute) and t.attr == "finetune":
+                    raise AssertionError("train_cls.py must not default args.finetune; "
+                                         "build_classifier resolves it per backbone")
+    # and the CLI default stays None
+    assert '--finetune", default=None' in src.replace("'", '"')
+
+
 if __name__ == "__main__":
     for k, fn in sorted(globals().items()):
         if k.startswith("test_"):

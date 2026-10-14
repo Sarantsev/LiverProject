@@ -213,7 +213,9 @@ def main() -> int:
         if getattr(args, k) is None:
             setattr(args, k, tcfg[key])
     args.backbone = args.backbone or ccfg.get("backbone", "segvol")
-    args.finetune = args.finetune or ccfg.get("finetune", "dora")
+    # Deliberately NOT resolved here: the adaptation mode belongs to the backbone, and a
+    # default picked at this level would override it (dora on a conv encoder crashes).
+    # build_classifier resolves None as: backbone config block -> backbone default.
     args.mask_source = args.mask_source or ccfg.get("mask_source", "pred")
     args.clinical_csv = args.clinical_csv or cfg["data"].get("clinical_csv") or None
     args.pred_masks = args.pred_masks or cfg["data"].get("pred_masks_csv") or None
