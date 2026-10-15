@@ -3,9 +3,9 @@
 Reads meta_info_patient.csv and emits a CSV in the exact format the training
 fusion path expects:
 
-    patient_id, clin_sex, clin_age, clin_cirrhosis, clin_hepatitis, clin_chemo, tumor_type
+    patient_id, clin_sex, clin_age, clin_cirrhosis, clin_hepatitis, tumor_type
 
-Only OBJECTIVE clinical variables are used. The radiological descriptors in
+Only OBJECTIVE clinical variables that do not disclose the primary tumour are used. The radiological descriptors in
 meta_info_tumor.csv (Nonrim APHE / Washout / Capsule / Rim APHE / ...) are
 DELIBERATELY EXCLUDED -- they are the radiologist's diagnostic read (e.g. LI-RADS
 HCC = APHE + washout + capsule) and would leak the label (circular). Tumor
@@ -29,7 +29,11 @@ import argparse
 import re
 import sys
 
-FEATURES = ["clin_sex", "clin_age", "clin_cirrhosis", "clin_hepatitis", "clin_chemo"]
+# clin_chemo is DELIBERATELY excluded. It is the single most discriminative column
+# (present in 94% of BCLM and 42% of CRLM against 5% of HCC) precisely because it reports
+# that the patient is already being treated for a known primary cancer -- i.e. it hands over
+# the answer for the metastatic classes rather than supporting an imaging diagnosis.
+FEATURES = ["clin_sex", "clin_age", "clin_cirrhosis", "clin_hepatitis"]
 
 
 def _yn(v):
@@ -105,7 +109,6 @@ def main() -> int:
     c_age = _find("patient_age", "age")
     c_cirr = _find("cirrhosis")
     c_hep = _find("hepatitis")
-    c_chemo = _find("chemotherapy", "chemo")
 
     rows, matched, unmatched = [], 0, 0
     # to_dict("records") keeps the ORIGINAL column names. itertuples() would rename any
@@ -124,7 +127,6 @@ def main() -> int:
             "clin_age": _age(d[c_age]),
             "clin_cirrhosis": _yn(d[c_cirr]),
             "clin_hepatitis": _yn(d[c_hep]),
-            "clin_chemo": _yn(d[c_chemo]),
             "tumor_type": str(d.get(c_type, "")).strip(),
         })
 

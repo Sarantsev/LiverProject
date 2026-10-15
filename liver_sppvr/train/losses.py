@@ -50,10 +50,11 @@ class ClsLoss(nn.Module):
     """focal-CE (+ supcon_weight * SupCon with a feature queue). forward -> dict of terms."""
     def __init__(self, class_weight: Optional[torch.Tensor] = None, focal_gamma: float = 2.0,
                  supcon_weight: float = 0.0, supcon_temp: float = 0.1, proj_dim: int = 128,
-                 queue_size: int = 512):
+                 queue_size: int = 512, aux_weight: float = 0.0):
         super().__init__()
         self.focal_gamma = focal_gamma
         self.supcon_weight = supcon_weight
+        self.aux_weight = aux_weight
         self.supcon_temp = supcon_temp
         self.register_buffer("class_weight", class_weight if class_weight is not None
                              else torch.empty(0))
@@ -70,14 +71,23 @@ class ClsLoss(nn.Module):
         self.q_feat[idx] = feat.float(); self.q_labels[idx] = labels
         self.q_ptr[0] = (int(self.q_ptr) + feat.shape[0]) % Q
 
-    def forward(self, logits, labels, proj=None) -> dict:
+    def forward(self, logits, labels, proj=None, aux_logits=None) -> dict:
+        """aux_logits: per-modality logits (image / clinical). Each gets its own loss term so
+        the weaker modality keeps receiving gradient after the stronger one has driven the
+        main loss to zero -- without this the clinical branch never learns."""
         cw = self.class_weight if self.class_weight.numel() > 0 else None
         cls = focal_ce_loss(logits.float(), labels, gamma=self.focal_gamma, weight=cw)
         con = torch.zeros((), device=logits.device)
+        aux = torch.zeros((), device=logits.device)
+        if self.aux_weight > 0 and aux_logits:
+            terms = [focal_ce_loss(a.float(), labels, gamma=self.focal_gamma, weight=cw)
+                     for a in aux_logits if a is not None]
+            if terms:
+                aux = torch.stack(terms).mean()
         if self.supcon_weight > 0 and proj is not None:
             ok = self.q_labels >= 0
             con = supcon_loss(proj.float(), labels, self.q_feat[ok], self.q_labels[ok],
                               temperature=self.supcon_temp)
             self._enqueue(proj, labels)
-        return {"loss": cls + self.supcon_weight * con, "cls_loss": cls.detach(),
-                "con_loss": con.detach()}
+        return {"loss": cls + self.supcon_weight * con + self.aux_weight * aux,
+                "cls_loss": cls.detach(), "con_loss": con.detach(), "aux_loss": aux.detach()}

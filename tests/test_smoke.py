@@ -220,35 +220,59 @@ def test_finetune_mode_follows_the_backbone(monkeypatch):
     assert m.backbone.net[2].weight.requires_grad and not m.backbone.net[0].weight.requires_grad
 
 
-def test_clinical_encoder_widens_the_tabular_share():
-    """The tabular vector must be encoded before fusion, not concatenated raw: 5 clinical
-    numbers against a 768-d embedding are 0.6% of the head's input and get ignored.
-    clinical_hidden=0 keeps the old raw concat so pre-existing checkpoints still load."""
-    emb = torch.randn(2, C, d, h, w)
-    extra = torch.randn(2, 5)
+def test_gated_head_forces_both_modalities_to_learn():
+    """One end-to-end model, not an ensemble: a gated fusion plus per-modality auxiliary
+    heads plus modality dropout, so the clinical branch keeps receiving gradient after the
+    much larger image branch has driven the main loss to zero."""
+    emb = torch.randn(B, C, d, h, w)
+    clin = torch.randn(B, 4)
 
-    enc = TumorClassificationHead(embed_dim=C, num_classes=N_CLASSES, hidden_dim=16,
-                                  pool="gap", extra_feat_dim=5, clinical_hidden=64)
-    raw = TumorClassificationHead(embed_dim=C, num_classes=N_CLASSES, hidden_dim=16,
-                                  pool="gap", extra_feat_dim=5, clinical_hidden=0)
-    assert enc.clin is not None and raw.clin is None
-    assert enc.mlp[1].in_features == C + 64
-    assert raw.mlp[1].in_features == C + 5
-    assert enc(emb, extra_feat=extra).shape == (B, N_CLASSES)
-    assert raw(emb, extra_feat=extra).shape == (B, N_CLASSES)
+    head = TumorClassificationHead(embed_dim=C, num_classes=N_CLASSES, hidden_dim=16,
+                                   pool="gap", extra_feat_dim=4, head="gated", fuse_dim=32,
+                                   img_drop=0.3, clin_drop=0.15)
+    head.train()
+    logits, ex = head(emb, extra_feat=clin, return_extras=True)
+    assert logits.shape == (B, N_CLASSES)
+    assert ex["aux_img"].shape == (B, N_CLASSES) and ex["aux_clin"].shape == (B, N_CLASSES)
+    assert ex["gate"].shape == (B,) and (0 <= ex["gate"]).all() and (ex["gate"] <= 1).all()
 
-    # the clinical pathway actually carries gradient
-    out = enc(emb, extra_feat=extra).sum()
-    out.backward()
-    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in enc.clin.parameters())
+    # the auxiliary path delivers gradient to the clinical encoder
+    (logits.sum() + ex["aux_clin"].sum()).backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in head.clin.parameters())
 
-    # and changing the clinical vector changes the prediction
-    enc.eval()
+    # modality dropout never zeroes both branches at once
+    hard = TumorClassificationHead(embed_dim=C, num_classes=N_CLASSES, hidden_dim=16,
+                                   pool="gap", extra_feat_dim=4, head="gated", fuse_dim=32,
+                                   img_drop=0.95, clin_drop=0.95).train()
+    for _ in range(100):
+        i, c = hard._modality_dropout(torch.ones(8, C), torch.ones(8, 64))
+        assert not ((i.abs().sum(1) == 0) & (c.abs().sum(1) == 0)).any()
+
+    # eval is deterministic (dropout off) and still responds to the clinical vector
+    head.eval()
     with torch.no_grad():
-        v = torch.tensor([[1.0, -0.5, 1.0, 1.0, 0.0], [0.0, 2.0, -1.0, -1.0, 1.0]])
-        a = enc(emb, extra_feat=v)
-        b = enc(emb, extra_feat=-v)
-    assert not torch.allclose(a, b, atol=1e-4)
+        a, b = head(emb, extra_feat=clin), head(emb, extra_feat=clin)
+        cc = head(emb, extra_feat=clin * -3)
+    assert torch.allclose(a, b) and not torch.allclose(a, cc, atol=1e-4)
+
+    # image-only and the legacy concat head both still build and run
+    for kind, dim in (("gated", 0), ("concat", 4)):
+        hh = TumorClassificationHead(embed_dim=C, num_classes=N_CLASSES, hidden_dim=16,
+                                     pool="gap", extra_feat_dim=dim, head=kind, fuse_dim=32)
+        assert hh(emb, extra_feat=(clin if dim else None)).shape == (B, N_CLASSES)
+
+
+def test_aux_loss_term_is_added():
+    """ClsLoss must add the per-modality terms; without them the clinical branch is starved."""
+    from liver_sppvr.train.losses import ClsLoss
+    y = torch.tensor([0, 1])
+    main = torch.randn(2, N_CLASSES)
+    aux = [torch.randn(2, N_CLASSES), torch.randn(2, N_CLASSES)]
+    off = ClsLoss(aux_weight=0.0)(main, y, None, aux)
+    on = ClsLoss(aux_weight=0.5)(main, y, None, aux)
+    assert float(off["aux_loss"]) == 0.0 and float(on["aux_loss"]) > 0
+    assert float(on["loss"]) > float(off["loss"])
+    assert float(ClsLoss(aux_weight=0.5)(main, y, None, [None, None])["aux_loss"]) == 0.0
 
 
 def test_trainer_does_not_override_the_backbone_finetune_mode():

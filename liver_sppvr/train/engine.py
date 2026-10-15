@@ -11,14 +11,14 @@ import torch
 from .metrics import cls_metrics
 
 
-def forward_batch(model, batch, device, *, use_mask: bool, want_proj: bool = False):
+def forward_batch(model, batch, device, *, use_mask: bool, want_extras: bool = False):
     kw = dict(phases=batch["phases"].to(device), phase_present=batch["phase_present"].to(device))
     if batch.get("clinical") is not None:
         kw["extra_feat"] = batch["clinical"].to(device)
     if use_mask:
         kw["mask"] = batch["mask"].to(device)
-    if want_proj:
-        kw["return_proj"] = True
+    if want_extras:
+        kw["return_extras"] = True
     return model(**kw)
 
 

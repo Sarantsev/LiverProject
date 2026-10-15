@@ -29,11 +29,18 @@ classifier:
   num_classes: 5
   class_names: [HCC, ICC, CRLM, BCLM, HH]
   hidden_dim: 256
-  clinical_hidden: 64                 # the tabular vector gets its own encoder before fusion.
-                                      # 5 clinical numbers concatenated raw to a 768-d image
-                                      # embedding are 0.6% of the input width and get ignored;
-                                      # 0 = raw concat (needed to load pre-2026-10-14 checkpoints)
-  dropout: 0.3
+  clinical_hidden: 64                 # the tabular vector gets its own encoder before fusion
+  head: gated                         # gated (Gated Multimodal Unit) | concat (legacy;
+                                      # an absent key means a pre-2026-10-15 checkpoint)
+  fuse_dim: 256                       # width of the fused representation
+  img_drop: 0.30                      # p(zero the image branch) per sample on train, and
+  clin_drop: 0.15                     # p(zero the clinical branch) -- never both at once.
+                                      # Without this the image branch (2.4M trainable params,
+                                      # train loss -> 0 by epoch ~27) starves the few thousand
+                                      # clinical weights of gradient and the model ignores
+                                      # features a logreg reads easily (ICC vs HCC: 0.77 for
+                                      # the logreg against 0.39 sensitivity for the network)
+  dropout: 0.4                        # raised: the image branch overfits
 
 # --- Backbones ---
 segvol:                               # BAAI/SegVol ViT-B via HF (trust_remote_code); image encoder only
@@ -44,8 +51,9 @@ segvol:                               # BAAI/SegVol ViT-B via HF (trust_remote_c
   normalize: foreground               # SegVol ForegroundNorm z-score (what the encoder was pretrained on)
   hu_window: [-175, 250]              # only used when normalize=hu
   lora:
-    rank: 16
-    alpha: 32                         # keep alpha = 2*rank
+    rank: 8                             # reduced: rank 8 (0.3M) matched rank 16 (2.4M)
+                                      # on this data with a milder overfit
+    alpha: 16                           # keep alpha = 2*rank
     dropout: 0.05
     targets: [qkv, out_proj, linear1, linear2]   # attention + MLP; expect "DORA: wrapped ~48"
 merlin:                               # Stanford Merlin I3D-ResNet-152; weights from HF stanfordmimi/Merlin
@@ -79,6 +87,7 @@ train:
   early_stop_patience: 20
   focal_gamma: 2.0
   mask_noise: 0.5                     # p(perturb the mask) on train when mask_source != none
-  supcon: 0.0                         # supervised-contrastive weight (0 = off; 0.1-0.3 helped before)
+  aux_weight: 0.3                     # weight of the per-modality auxiliary losses
+  supcon: 0.2                         # supervised-contrastive weight (0 = off; 0.1-0.3 helped before)
   supcon_temp: 0.1
   supcon_queue: 512

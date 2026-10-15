@@ -23,7 +23,8 @@ class LiverTumorClassifier(nn.Module):
     def __init__(self, backbone: Backbone, num_classes: int = 5, n_phases: int = 4,
                  fusion_mode: str = "attention", hidden_dim: int = 256, dropout: float = 0.3,
                  pool: str = "masked", extra_feat_dim: int = 0,
-                 clinical_hidden: int = 64):
+                 clinical_hidden: int = 64, head: str = "gated", fuse_dim: int = 256,
+                 img_drop: float = 0.3, clin_drop: float = 0.15):
         super().__init__()
         self.backbone = backbone
         self.n_phases = n_phases
@@ -32,7 +33,9 @@ class LiverTumorClassifier(nn.Module):
         self.head = TumorClassificationHead(embed_dim=backbone.embed_dim, num_classes=num_classes,
                                             hidden_dim=hidden_dim, dropout=dropout, pool=pool,
                                             extra_feat_dim=extra_feat_dim,
-                                            clinical_hidden=clinical_hidden)
+                                            clinical_hidden=clinical_hidden, head=head,
+                                            fuse_dim=fuse_dim, img_drop=img_drop,
+                                            clin_drop=clin_drop)
         # autocast inside forward: with DataParallel the replica threads do not inherit the
         # caller's (thread-local) autocast context, so the trainer sets this flag instead.
         self.amp_in_forward = False
@@ -51,7 +54,9 @@ class LiverTumorClassifier(nn.Module):
         embs = torch.stack([self.backbone(phases[:, i]) for i in range(phases.shape[1])], dim=1)
         return self.phase_fusion.fuse_embeddings(embs, phase_present=phase_present)
 
-    def forward(self, phases, phase_present=None, extra_feat=None, mask=None, return_proj=False):
+    def forward(self, phases, phase_present=None, extra_feat=None, mask=None,
+                return_proj=False, return_extras=False):
         with torch.cuda.amp.autocast(enabled=self.amp_in_forward):
             fused, self.last_phase_weights = self.encode_multiphase(phases, phase_present)
-            return self.head(fused, mask=mask, extra_feat=extra_feat, return_proj=return_proj)
+            return self.head(fused, mask=mask, extra_feat=extra_feat,
+                             return_proj=return_proj, return_extras=return_extras)

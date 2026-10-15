@@ -106,10 +106,12 @@ def train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, work_d
     scheduler = make_scheduler(optimizer, tcfg.get("warmup_epoch", 0), args.epochs)
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     supcon = args.supcon if ours else 0.0
+    aux_w = args.aux_weight if ours else 0.0      # baselines have no per-modality branches
     loss_fn = ClsLoss(class_weights([labels_by_patient[p] for p in tr_ids], num_classes),
                       focal_gamma=tcfg.get("focal_gamma", 2.0), supcon_weight=supcon,
                       supcon_temp=tcfg.get("supcon_temp", 0.1),
-                      queue_size=tcfg.get("supcon_queue", 512)).to(device)
+                      queue_size=tcfg.get("supcon_queue", 512),
+                      aux_weight=aux_w).to(device)
     os.makedirs(work_dir, exist_ok=True)
 
     n_batches = len(train_loader)
@@ -121,9 +123,11 @@ def train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, work_d
             y = batch["label"].to(device)
             optimizer.zero_grad()
             with torch.cuda.amp.autocast(enabled=use_amp):
-                out = forward_batch(model, batch, device, use_mask=use_mask, want_proj=supcon > 0)
-                logits, proj = out if isinstance(out, tuple) else (out, None)
-                losses = loss_fn(logits, y, proj)
+                want = (supcon > 0) or (aux_w > 0)
+                out = forward_batch(model, batch, device, use_mask=use_mask, want_extras=want)
+                logits, extras = out if isinstance(out, tuple) else (out, {})
+                losses = loss_fn(logits, y, extras.get("proj"),
+                                 [extras.get("aux_img"), extras.get("aux_clin")])
                 loss = losses["loss"]
                 aux = getattr(core, "last_aux", None)            # e.g. LCA-DB attention-similarity
                 if aux is not None:
@@ -137,8 +141,11 @@ def train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, work_d
             run += loss.item() * y.shape[0]
             if bi % args.log_interval == 0:
                 sps = (bi + 1) * args.batch_size / max(time.time() - t0, 1e-6)
+                gate = getattr(core.head, "last_gate", None) if ours else None
+                g = f" gate={gate.mean().item():.2f}" if gate is not None else ""
                 print(f"  ep{epoch+1} [{bi+1}/{n_batches}] loss={loss.item():.4f} "
                       f"cls={float(losses['cls_loss']):.4f} con={float(losses['con_loss']):.4f} "
+                      f"aux={float(losses.get('aux_loss', 0.0)):.4f}{g} "
                       f"({sps:.1f} samp/s)", flush=True)
         scheduler.step()
         ev = evaluate(model, val_loader, device, num_classes, use_mask=use_mask)
@@ -186,6 +193,8 @@ def main() -> int:
     ap.add_argument("--roi", default=None, choices=("none", "body", "pred"),
                     help="ROI crop; default: pred when --mask-source pred, else config preprocess.roi")
     ap.add_argument("--supcon", type=float, default=None, help="SupCon weight (ours; default cfg)")
+    ap.add_argument("--aux-weight", type=float, default=None,
+                    help="weight of the per-modality auxiliary losses (ours; default cfg)")
     ap.add_argument("--clinical-csv", default=None, help="per-patient clinical CSV (default cfg data.clinical_csv)")
     # protocol
     ap.add_argument("--kfold", type=int, default=5)
@@ -209,7 +218,8 @@ def main() -> int:
     tcfg, ccfg = cfg["train"], cfg["classifier"]
     for k, key in (("epochs", "num_epochs"), ("batch_size", "batch_size"), ("num_workers", "num_workers"),
                    ("lr", "lr"), ("weight_decay", "weight_decay"), ("patience", "early_stop_patience"),
-                   ("mask_noise", "mask_noise"), ("supcon", "supcon")):
+                   ("mask_noise", "mask_noise"), ("supcon", "supcon"),
+                   ("aux_weight", "aux_weight")):
         if getattr(args, k) is None:
             setattr(args, k, tcfg[key])
     args.backbone = args.backbone or ccfg.get("backbone", "segvol")
