@@ -10,17 +10,24 @@ from __future__ import annotations
 import os
 
 
-def load_clinical(csv_path, train_ids):
+def load_clinical(csv_path, train_ids, exclude=()):
     """-> {patient_id: np.float32 vector} or None when csv_path is empty/missing.
 
     Features are z-scored with TRAIN-fold statistics only (no leakage); NaN -> 0.
     Call once per fold with that fold's train ids.
+
+    exclude: column names to drop, e.g. ("clin_chemo",) for the ablation that removes the
+    feature disclosing the primary tumour.
     """
     if not csv_path or not os.path.exists(csv_path):
         return None
     import pandas as pd
     df = pd.read_csv(csv_path).set_index("patient_id")
-    feat_cols = [c for c in df.columns if c != "tumor_type"]
+    drop = {"tumor_type", *exclude}
+    feat_cols = [c for c in df.columns if c not in drop]
+    missing = set(exclude) - set(df.columns)
+    if missing:
+        raise ValueError(f"cannot exclude {sorted(missing)}: not in {csv_path}")
     train_rows = df.loc[df.index.intersection(list(train_ids)), feat_cols]
     mu = train_rows.mean()
     sd = train_rows.std().replace(0, 1.0)

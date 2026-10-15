@@ -28,6 +28,12 @@ classifier:
   mask_source: pred                   # none (GAP, image-only) | gt (semi-auto upper bound) | pred (fully-auto)
   num_classes: 5
   class_names: [HCC, ICC, CRLM, BCLM, HH]
+  class_merge: {}                     # {} = the 5-class task. {Metastasis: [CRLM, BCLM]} gives
+                                      # the 4-class task used by the published work (STIC:
+                                      # HCC / ICC / metastasis): the primary site is not visible
+                                      # in a liver metastasis, so separating CRLM from BCLM rests
+                                      # on chemotherapy history rather than on the image. Folds
+                                      # stay stratified on the original 5 classes either way.
   hidden_dim: 256
   clinical_hidden: 64                 # the tabular vector gets its own encoder before fusion
   head: gated                         # gated (Gated Multimodal Unit) | concat (legacy;

@@ -11,16 +11,54 @@ import json
 import random
 
 
-def labels_from_manifest(manifest, class_names) -> dict:
+def parse_class_merge(spec) -> dict:
+    """Merge spec -> {original tumor_type: target class name}.
+
+    Accepts the config form {"Metastasis": ["CRLM", "BCLM"]} or the CLI form
+    ["Metastasis=CRLM,BCLM"]. Merging CRLM and BCLM is the four-class task used by the
+    published work on this problem (STIC: HCC / ICC / metastasis), and it is the honest
+    formulation when the primary site is not visible in the liver lesion.
+    """
+    out = {}
+    if not spec:
+        return out
+    items = spec.items() if isinstance(spec, dict) else (e.split("=", 1) for e in spec)
+    for target, members in items:
+        names = members if isinstance(members, (list, tuple)) else members.split(",")
+        for m in names:
+            out[m.strip()] = target.strip()
+    return out
+
+
+def merged_class_names(class_names, merge: dict):
+    """Original class order with merged members replaced by their target, first occurrence wins."""
+    out = []
+    for c in class_names:
+        t = merge.get(c, c)
+        if t not in out:
+            out.append(t)
+    return out
+
+
+def labels_from_manifest(manifest, class_names, merge: dict | None = None) -> dict:
     """{patient_id: label_idx} in the order MultiPhaseLiverDataset enumerates patients
-    (pandas groupby -> sorted patient_id). Patients whose tumor_type is not in
-    class_names are skipped, exactly as the dataset does."""
-    class_to_idx = {c: i for i, c in enumerate(class_names)}
+    (pandas groupby -> sorted patient_id). Patients whose tumor_type is not in class_names
+    are skipped, exactly as the dataset does.
+
+    merge: {original tumor_type: target class name}. Pass it to get the merged targets;
+    pass nothing to get the original labels. IMPORTANT: build the folds from the ORIGINAL
+    labels even when training on merged ones, so the folds stay identical across task
+    formulations and the two can be compared on the same patients.
+    """
+    merge = merge or {}
+    names = merged_class_names(class_names, merge) if merge else list(class_names)
+    class_to_idx = {c: i for i, c in enumerate(names)}
     out = {}
     for pid, grp in manifest.groupby("patient_id"):
         t = grp["tumor_type"].iloc[0]
-        if t in class_to_idx:
-            out[pid] = class_to_idx[t]
+        if t not in class_names:
+            continue
+        out[pid] = class_to_idx[merge.get(t, t)]
     return out
 
 

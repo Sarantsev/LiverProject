@@ -36,6 +36,7 @@ class MultiPhaseLiverDataset(Dataset):
         self,
         manifest,
         class_names: Sequence[str],
+        class_merge: Optional[dict] = None,   # {tumor_type: target class} for a merged task
         phases: Sequence[str] = ("non_contrast", "arterial", "portal", "delayed"),
         spatial_size: Sequence[int] = (32, 256, 256),
         hu_window: Sequence[float] = (-175, 250),
@@ -54,6 +55,7 @@ class MultiPhaseLiverDataset(Dataset):
         if roi == "pred" and not mask_override:
             raise ValueError("roi='pred' needs mask_override (predicted masks); "
                              "a GT-derived ROI is a leak and is not supported")
+        self.class_merge = class_merge or {}
         self.class_names = list(class_names)
         self.class_to_idx = {c: i for i, c in enumerate(self.class_names)}
         self.phases = list(phases)
@@ -73,7 +75,8 @@ class MultiPhaseLiverDataset(Dataset):
             df = df[df["patient_id"].isin(set(patient_ids))]
         self._patients: List[dict] = []
         for pid, grp in df.groupby("patient_id"):
-            tumor_type = grp["tumor_type"].iloc[0]
+            raw_type = grp["tumor_type"].iloc[0]
+            tumor_type = self.class_merge.get(raw_type, raw_type)
             if tumor_type not in self.class_to_idx:
                 continue
             if mask_override is not None and pid not in mask_override:

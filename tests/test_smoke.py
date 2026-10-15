@@ -293,6 +293,61 @@ def test_trainer_does_not_override_the_backbone_finetune_mode():
     assert '--finetune", default=None' in src.replace("'", '"')
 
 
+def test_class_merge_keeps_the_folds_comparable():
+    """The 4-class task (CRLM+BCLM -> Metastasis, as in the published work) must reuse the
+    5-class folds: stratifying on the merged labels would give different folds and make the
+    two formulations incomparable on the same patients."""
+    import pandas as pd
+    from liver_sppvr.train.splits import (labels_from_manifest, make_kfold_splits,
+                                          merged_class_names, parse_class_merge)
+    orig = ["HCC", "ICC", "CRLM", "BCLM", "HH"]
+    man = pd.DataFrame([{"patient_id": f"p{i:03d}", "tumor_type": orig[i % 5],
+                         "phase": "portal", "image_path": "x", "mask_path": "m"}
+                        for i in range(50)])
+
+    # spec parsing, both the config form and the CLI form
+    assert parse_class_merge({"Metastasis": ["CRLM", "BCLM"]}) == \
+           parse_class_merge(["Metastasis=CRLM,BCLM"]) == \
+           {"CRLM": "Metastasis", "BCLM": "Metastasis"}
+    assert parse_class_merge(None) == {} and parse_class_merge({}) == {}
+
+    m = parse_class_merge(["Metastasis=CRLM,BCLM"])
+    assert merged_class_names(orig, m) == ["HCC", "ICC", "Metastasis", "HH"]
+
+    lo = labels_from_manifest(man, orig)
+    lm = labels_from_manifest(man, orig, m)
+    assert len(set(lo.values())) == 5 and len(set(lm.values())) == 4
+    assert lm["p002"] == lm["p003"]          # CRLM and BCLM collapse together
+    assert lm["p000"] != lm["p002"]          # HCC stays separate
+    assert set(lo) == set(lm)                # nobody is dropped
+
+    # folds built from the ORIGINAL labels are what both formulations must share
+    a = make_kfold_splits(lo, 5, 2023)
+    assert a == make_kfold_splits(lo, 5, 2023)
+    assert a != make_kfold_splits(lm, 5, 2023), "merged labels would change the folds"
+
+
+def test_clinical_exclude_drops_a_column():
+    """--clinical-exclude clin_chemo must remove it, and must fail loudly on a typo."""
+    import tempfile, os
+    from liver_sppvr.data.clinical import feat_dim, load_clinical
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "c.csv")
+        with open(path, "w") as f:
+            f.write("patient_id,clin_sex,clin_age,clin_chemo,tumor_type\n")
+            for i in range(6):
+                f.write(f"p{i},{i%2},{50+i},{i%2},HCC\n")
+        ids = [f"p{i}" for i in range(4)]
+        assert feat_dim(load_clinical(path, ids)) == 3
+        assert feat_dim(load_clinical(path, ids, exclude=("clin_chemo",))) == 2
+        try:
+            load_clinical(path, ids, exclude=("clin_nope",))
+        except ValueError as e:
+            assert "clin_nope" in str(e)
+        else:
+            raise AssertionError("excluding a missing column must raise")
+
+
 if __name__ == "__main__":
     for k, fn in sorted(globals().items()):
         if k.startswith("test_"):

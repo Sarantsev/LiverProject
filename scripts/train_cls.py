@@ -47,6 +47,7 @@ from liver_sppvr.train.engine import evaluate, forward_batch
 from liver_sppvr.train.losses import ClsLoss
 from liver_sppvr.train.metrics import print_per_class, save_confusion, write_summary
 from liver_sppvr.train.splits import (dump_splits, labels_from_manifest, make_kfold_splits,
+                                      merged_class_names, parse_class_merge,
                                       stratified_patient_split)
 from liver_sppvr.utils.device import resolve_device
 
@@ -58,7 +59,7 @@ def train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, work_d
                clinical, pred_masks) -> dict:
     tcfg, pcfg = cfg["train"], cfg.get("preprocess", {})
     phases = cfg["multiphase"]["phases"]
-    num_classes = cfg["classifier"]["num_classes"]
+    num_classes = len(args.class_names)
     use_amp = args.amp and getattr(device, "type", str(device)) == "cuda"
     ours = args.model == "ours"
 
@@ -84,7 +85,7 @@ def train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, work_d
     # ---- data ----
     roi = args.roi or ("pred" if (use_mask and args.mask_source == "pred") else pcfg.get("roi", "body"))
     override = pred_masks if (use_mask and args.mask_source == "pred") else None
-    common = dict(class_names=cfg["classifier"]["class_names"], phases=phases,
+    common = dict(class_names=args.class_names, class_merge=args.class_merge, phases=phases,
                   spatial_size=spec["spatial_size"], hu_window=spec["hu_window"],
                   normalize=spec["normalize"], spacing=spec.get("spacing"), roi=roi, roi_margin=pcfg.get("roi_margin", 0.5),
                   mask_override=override, clinical=clinical)
@@ -164,13 +165,13 @@ def train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, work_d
                 break
 
     print(f"Done fold. best AUC/F1={best:.4f} @ epoch {best_epoch}")
-    print_per_class(best_ev, cfg["classifier"].get("class_names"))
+    print_per_class(best_ev, args.class_names)
     if "confusion" in best_ev:
-        save_confusion(best_ev["confusion"], cfg["classifier"].get("class_names"),
+        save_confusion(best_ev["confusion"], args.class_names,
                        os.path.join(work_dir, "confusion"), title=f"{args.run_name} (best epoch)")
     with open(os.path.join(work_dir, "metrics.json"), "w") as f:
         json.dump({"model": args.run_name, "best_epoch": best_epoch,
-                   "class_names": cfg["classifier"].get("class_names"), **best_ev}, f, indent=2)
+                   "class_names": args.class_names, **best_ev}, f, indent=2)
     del model, core, train_ds, val_ds
     gc.collect()
     if torch.cuda.is_available():
@@ -196,6 +197,11 @@ def main() -> int:
     ap.add_argument("--aux-weight", type=float, default=None,
                     help="weight of the per-modality auxiliary losses (ours; default cfg)")
     ap.add_argument("--clinical-csv", default=None, help="per-patient clinical CSV (default cfg data.clinical_csv)")
+    ap.add_argument("--clinical-exclude", nargs="*", default=None,
+                    help="clinical columns to drop, e.g. clin_chemo (it discloses the primary)")
+    ap.add_argument("--class-merge", nargs="*", default=None,
+                    help="merge classes, e.g. Metastasis=CRLM,BCLM -> the 4-class task. Folds "
+                         "stay stratified on the ORIGINAL classes so formulations stay comparable")
     # protocol
     ap.add_argument("--kfold", type=int, default=5)
     ap.add_argument("--fold", type=int, default=None, help="run only this fold index (0..k-1)")
@@ -231,21 +237,30 @@ def main() -> int:
     args.pred_masks = args.pred_masks or cfg["data"].get("pred_masks_csv") or None
     args.resize = tuple(int(x) for x in args.resize.split(",")) if args.resize else None
     args.run_name = (f"ours-{args.backbone}-{args.mask_source}" if args.model == "ours" else args.model)
+    if args.clinical_exclude:
+        args.run_name += "-no" + "".join(c.replace("clin_", "") for c in args.clinical_exclude)
     if args.model == "ours" and args.mask_source == "pred" and not args.pred_masks and not args.dump_splits:
         ap.error("--mask-source pred needs --pred-masks (out-of-fold predicted masks)")
 
     set_seed(cfg["project"]["seed"])
     device = resolve_device(args.device or cfg.get("device", "auto"))
     man = load_manifest(args.manifest or cfg["data"]["manifest"])
-    labels_by_patient = labels_from_manifest(man, ccfg["class_names"])
+    orig_names = ccfg["class_names"]
+    args.class_merge = parse_class_merge(args.class_merge if args.class_merge is not None
+                                         else ccfg.get("class_merge"))
+    # folds come from the ORIGINAL labels even for a merged task: identical patients per
+    # fold across formulations, so 5-class and 4-class numbers are comparable
+    fold_labels = labels_from_manifest(man, orig_names)
+    args.class_names = merged_class_names(orig_names, args.class_merge)
+    labels_by_patient = labels_from_manifest(man, orig_names, args.class_merge)
     seed = cfg["project"]["seed"]
-    splits = (make_kfold_splits(labels_by_patient, k=args.kfold, seed=seed) if args.kfold > 1
-              else [stratified_patient_split(labels_by_patient, seed=seed)])
+    splits = (make_kfold_splits(fold_labels, k=args.kfold, seed=seed) if args.kfold > 1
+              else [stratified_patient_split(fold_labels, seed=seed)])
     if args.dump_splits:
         dump_splits(splits, args.dump_splits)
         print(f"splits -> {args.dump_splits} ({len(labels_by_patient)} patients, k={args.kfold}, seed={seed})")
         return 0
-    print(f"model={args.run_name} | patients={len(labels_by_patient)} | classes={ccfg['num_classes']} | "
+    print(f"model={args.run_name} | patients={len(labels_by_patient)} | classes={len(args.class_names)}{' '+str(args.class_names) if args.class_merge else ''} | "
           f"kfold={args.kfold} | clinical={'yes' if args.clinical_csv else 'no'} | device={device}")
     if args.model == "stic" and not args.clinical_csv:
         print("WARNING: STIC without --clinical-csv runs imaging-only (report as an ablation).")
@@ -255,7 +270,7 @@ def main() -> int:
     for i, (tr_ids, va_ids) in enumerate(splits):
         if args.fold is not None and i != args.fold:
             continue
-        clinical = load_clinical(args.clinical_csv, tr_ids)     # z-scored on THIS fold's train ids
+        clinical = load_clinical(args.clinical_csv, tr_ids, exclude=args.clinical_exclude or ())     # z-scored on THIS fold's train ids
         wd = os.path.join(args.work_dir, f"fold{i}") if args.kfold > 1 else args.work_dir
         print(f"\n===== {args.run_name} fold {i+1}/{args.kfold} (train {len(tr_ids)}, val {len(va_ids)}) =====")
         m = train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, wd,
@@ -263,7 +278,7 @@ def main() -> int:
         m["fold"] = i
         results.append(m)
 
-    write_summary(results, args.work_dir, args.run_name, args.kfold, ccfg.get("class_names"))
+    write_summary(results, args.work_dir, args.run_name, args.kfold, args.class_names)
     return 0
 
 
