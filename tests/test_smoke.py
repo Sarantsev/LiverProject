@@ -348,6 +348,31 @@ def test_clinical_exclude_drops_a_column():
             raise AssertionError("excluding a missing column must raise")
 
 
+def test_merged_task_builds_a_head_with_fewer_outputs(monkeypatch):
+    """With class_merge the task has fewer classes than classifier.class_names lists.
+    build_classifier must take num_classes from the caller: reading it from the config built
+    a 5-output head for a 4-class task, and training died on the class-weight shape."""
+    import liver_sppvr.train.build as build
+    monkeypatch.setattr(build, "build_backbone", lambda name, cfg: _StubBackbone())
+    cfg = {"classifier": {"backbone": "stub", "finetune": "frozen", "mask_source": "none",
+                          "num_classes": 5, "class_names": ["HCC", "ICC", "CRLM", "BCLM", "HH"],
+                          "hidden_dim": 16, "dropout": 0.1, "head": "gated", "fuse_dim": 32,
+                          "class_merge": {"Metastasis": ["CRLM", "BCLM"]}},
+           "multiphase": {"phases": ["a", "b", "c", "d"], "fusion": "attention"},
+           "stub": {"finetune": "frozen"}}
+    phases, present = torch.randn(B, 4, 1, D, H, W), torch.ones(B, 4)
+
+    m4 = build.build_classifier(cfg, "cpu", num_classes=4)
+    assert m4(phases, present).shape == (B, 4)
+    m5 = build.build_classifier(cfg, "cpu")                    # no override -> config value
+    assert m5(phases, present).shape == (B, 5)
+
+    # and the 4-class logits work with 4 class weights, which is what crashed before
+    from liver_sppvr.train.losses import ClsLoss
+    loss = ClsLoss(class_weight=torch.ones(4))(m4(phases, present), torch.tensor([0, 3]))
+    assert torch.isfinite(loss["loss"])
+
+
 if __name__ == "__main__":
     for k, fn in sorted(globals().items()):
         if k.startswith("test_"):

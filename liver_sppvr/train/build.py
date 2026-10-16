@@ -42,7 +42,8 @@ def make_scheduler(optimizer, warmup: int, total: int):
 
 def build_classifier(cfg: dict, device, *, backbone: str | None = None,
                      finetune: str | None = None, mask_source: str | None = None,
-                     clinical_dim: int = 0) -> LiverTumorClassifier:
+                     clinical_dim: int = 0,
+                     num_classes: int | None = None) -> LiverTumorClassifier:
     """Our model: pretrained backbone (segvol|merlin) + phase fusion + head.
 
     mask_source none -> global-average pooling; gt|pred -> masked pooling (the trainer
@@ -50,6 +51,9 @@ def build_classifier(cfg: dict, device, *, backbone: str | None = None,
     """
     ccfg = cfg["classifier"]
     mp = cfg["multiphase"]
+    # Must come from the caller: with classifier.class_merge the task has fewer classes
+    # than class_names lists, and reading the config here would build the wrong head.
+    num_classes = num_classes or ccfg["num_classes"]
     backbone = backbone or ccfg.get("backbone", "segvol")
     mask_source = mask_source or ccfg.get("mask_source", "pred")
     bb = build_backbone(backbone, cfg)
@@ -63,7 +67,7 @@ def build_classifier(cfg: dict, device, *, backbone: str | None = None,
     ft_cfg["partial_targets"] = bcfg.get("partial_targets")
     bb.set_finetune(finetune, ft_cfg)
     model = LiverTumorClassifier(
-        bb, num_classes=ccfg["num_classes"], n_phases=len(mp["phases"]),
+        bb, num_classes=num_classes, n_phases=len(mp["phases"]),
         fusion_mode=mp.get("fusion", "attention"), hidden_dim=ccfg["hidden_dim"],
         dropout=ccfg["dropout"], pool=("gap" if mask_source == "none" else "masked"),
         extra_feat_dim=clinical_dim, clinical_hidden=ccfg.get("clinical_hidden", 0),
@@ -72,7 +76,8 @@ def build_classifier(cfg: dict, device, *, backbone: str | None = None,
         img_drop=ccfg.get("img_drop", 0.0), clin_drop=ccfg.get("clin_drop", 0.0))
     clin_h = ccfg.get("clinical_hidden", 0)
     clin_desc = f"{clinical_dim}->{clin_h}" if (clinical_dim and clin_h) else str(clinical_dim)
-    print(f"classifier: backbone={backbone} finetune={finetune} mask_source={mask_source} "
+    print(f"classifier: backbone={backbone} classes={num_classes} finetune={finetune} "
+          f"mask_source={mask_source} "
           f"clinical={clin_desc} head={ccfg.get('head', 'concat')} "
           f"modality_drop=img{ccfg.get('img_drop', 0.0)}/clin{ccfg.get('clin_drop', 0.0)} "
           f"fusion={mp.get('fusion', 'attention')}")

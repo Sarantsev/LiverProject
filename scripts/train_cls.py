@@ -66,7 +66,8 @@ def train_fold(cfg, args, device, man, tr_ids, va_ids, labels_by_patient, work_d
     # ---- model (built first: it declares the preprocessing it was pretrained with) ----
     if ours:
         core = build_classifier(cfg, device, backbone=args.backbone, finetune=args.finetune,
-                                mask_source=args.mask_source, clinical_dim=feat_dim(clinical))
+                                mask_source=args.mask_source, clinical_dim=feat_dim(clinical),
+                                num_classes=num_classes)
         spec = core.backbone.preprocess_spec
         use_mask = core.uses_mask
         core.amp_in_forward = use_amp

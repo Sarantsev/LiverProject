@@ -30,7 +30,8 @@ from liver_sppvr.data.dataset import load_pred_masks
 from liver_sppvr.train.build import build_classifier, load_config, set_seed
 from liver_sppvr.train.engine import evaluate
 from liver_sppvr.train.metrics import cls_metrics, print_per_class, save_confusion, write_summary
-from liver_sppvr.train.splits import labels_from_manifest, make_kfold_splits
+from liver_sppvr.train.splits import (labels_from_manifest, make_kfold_splits,
+                                      merged_class_names, parse_class_merge)
 from liver_sppvr.utils.device import resolve_device
 
 DICE_BINS = ((0.0, 0.3), (0.3, 0.6), (0.6, 1.01))
@@ -64,10 +65,17 @@ def main() -> int:
     device = resolve_device(args.device or cfg.get("device", "auto"))
     use_amp = args.amp and getattr(device, "type", str(device)) == "cuda"
     ccfg, pcfg = cfg["classifier"], cfg.get("preprocess", {})
-    num_classes, class_names = ccfg["num_classes"], ccfg["class_names"]
+    merge = parse_class_merge(targs0.get("class_merge") or ccfg.get("class_merge"))
+    class_names = merged_class_names(ccfg["class_names"], merge) if merge else ccfg["class_names"]
+    num_classes = len(class_names)
+    # the training run recorded its own task formulation; honour it
+    _ck0 = torch.load(os.path.join(args.cls_dir, "fold0", "best.pth"), map_location="cpu")
+    targs0 = _ck0.get("args", {})
     man = load_manifest(args.manifest or cfg["data"]["manifest"])
-    labels = labels_from_manifest(man, class_names)
-    splits = make_kfold_splits(labels, k=args.kfold, seed=cfg["project"]["seed"])
+    labels = labels_from_manifest(man, ccfg["class_names"], merge)
+    # folds always come from the ORIGINAL classes (see train/splits.py)
+    splits = make_kfold_splits(labels_from_manifest(man, ccfg["class_names"]),
+                               k=args.kfold, seed=cfg["project"]["seed"])
     pred_masks = load_pred_masks(args.pred_masks)
     with open(args.pred_masks) as f:
         dice_csv = {r["patient_id"]: r.get("dice") for r in csv.DictReader(f)}
@@ -85,13 +93,14 @@ def main() -> int:
         clinical = load_clinical(args.clinical_csv or targs.get("clinical_csv"), tr_ids)
         model = build_classifier(ckpt["config"], device, backbone=targs.get("backbone"),
                                  finetune=targs.get("finetune"), mask_source="pred",
-                                 clinical_dim=feat_dim(clinical))
+                                 clinical_dim=feat_dim(clinical), num_classes=num_classes)
         model.load_state_dict(ckpt["model"]); model.amp_in_forward = use_amp
         spec = model.backbone.preprocess_spec
         ds = MultiPhaseLiverDataset(man, class_names=class_names, phases=cfg["multiphase"]["phases"],
                                     spatial_size=spec["spatial_size"], hu_window=spec["hu_window"],
                                     normalize=spec["normalize"], spacing=spec.get("spacing"),
-                                    patient_ids=va_ids, roi=targs.get("roi") or "pred",
+                                    class_merge=merge, patient_ids=va_ids,
+                                    roi=targs.get("roi") or "pred",
                                     roi_margin=pcfg.get("roi_margin", 0.5),
                                     mask_override=pred_masks, clinical=clinical)
         loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_multiphase,
