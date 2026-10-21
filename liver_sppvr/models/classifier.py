@@ -21,16 +21,18 @@ from .multiphase import PhaseFusion
 
 class LiverTumorClassifier(nn.Module):
     def __init__(self, backbone: Backbone, num_classes: int = 5, n_phases: int = 4,
-                 fusion_mode: str = "attention", hidden_dim: int = 256, dropout: float = 0.3,
+                 fusion_mode: str = "diff", hidden_dim: int = 256, dropout: float = 0.3,
                  pool: str = "masked", extra_feat_dim: int = 0,
                  clinical_hidden: int = 64, head: str = "gated", fuse_dim: int = 256,
-                 img_drop: float = 0.3, clin_drop: float = 0.15):
+                 img_drop: float = 0.3, clin_drop: float = 0.15,
+                 fusion_width: int = 256):
         super().__init__()
         self.backbone = backbone
         self.n_phases = n_phases
         self.phase_fusion = PhaseFusion(mode=fusion_mode, n_phases=n_phases,
-                                        embed_dim=backbone.embed_dim)
-        self.head = TumorClassificationHead(embed_dim=backbone.embed_dim, num_classes=num_classes,
+                                        embed_dim=backbone.embed_dim, width=fusion_width)
+        self.head = TumorClassificationHead(embed_dim=self.phase_fusion.out_dim,
+                                            num_classes=num_classes,
                                             hidden_dim=hidden_dim, dropout=dropout, pool=pool,
                                             extra_feat_dim=extra_feat_dim,
                                             clinical_hidden=clinical_hidden, head=head,

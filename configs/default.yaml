@@ -13,7 +13,16 @@ data:
 # --- Multi-phase CT ---
 multiphase:
   phases: [non_contrast, arterial, portal, delayed]
-  fusion: attention                   # attention | cross_attention | concat_stem
+  fusion: diff                        # diff | attention | cross_attention | concat_stem.
+                                      # diff = phases AND their consecutive differences as
+                                      # separate streams. attention/cross_attention can only
+                                      # form a CONVEX COMBINATION of the phases, so they cannot
+                                      # represent a difference -- and every subtype in this
+                                      # dataset is defined by one (HCC: APHE then washout,
+                                      # ICC: progressive, HH: peripheral nodular filling).
+                                      # All results up to 2026-10-21 used `attention`.
+  fusion_width: 256                   # bottleneck of the diff projection (n_streams*C -> 256 -> C);
+                                      # adds ~1.6M params. A direct 7C -> C conv (4.1M) overfits.
 
 # --- Region of interest fed to the classifier (one box per patient, all phases + mask) ---
 preprocess:

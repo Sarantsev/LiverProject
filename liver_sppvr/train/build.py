@@ -68,7 +68,8 @@ def build_classifier(cfg: dict, device, *, backbone: str | None = None,
     bb.set_finetune(finetune, ft_cfg)
     model = LiverTumorClassifier(
         bb, num_classes=num_classes, n_phases=len(mp["phases"]),
-        fusion_mode=mp.get("fusion", "attention"), hidden_dim=ccfg["hidden_dim"],
+        fusion_mode=mp.get("fusion", "diff"), fusion_width=mp.get("fusion_width", 256),
+        hidden_dim=ccfg["hidden_dim"],
         dropout=ccfg["dropout"], pool=("gap" if mask_source == "none" else "masked"),
         extra_feat_dim=clinical_dim, clinical_hidden=ccfg.get("clinical_hidden", 0),
         head=ccfg.get("head", "concat"),            # absent key = old checkpoint
@@ -80,5 +81,5 @@ def build_classifier(cfg: dict, device, *, backbone: str | None = None,
           f"mask_source={mask_source} "
           f"clinical={clin_desc} head={ccfg.get('head', 'concat')} "
           f"modality_drop=img{ccfg.get('img_drop', 0.0)}/clin{ccfg.get('clin_drop', 0.0)} "
-          f"fusion={mp.get('fusion', 'attention')}")
+          f"fusion={mp.get('fusion', 'diff')}")
     return model.to(device)

@@ -14,8 +14,34 @@ Modes:
    are combined by a weighted sum. Cheap, but phases do not interact.
 
 3. "cross_attention" -- multi-head self-attention across the phase axis at each spatial
-   token: the 4 phases attend to each other (contrast dynamics become explicit), then
-   are mean-pooled. Richer than "attention"; a bit more compute.
+   token: the 4 phases attend to each other, then are mean-pooled.
+
+4. "diff" -- per-phase embeddings AND their consecutive differences, concatenated and
+   projected back. The default; see below for why the other three are inadequate.
+
+Why "diff" exists. Modes 2 and 3 can only produce a CONVEX COMBINATION of the phase
+embeddings: mode 2 is literally sum(w_p * E_p) with softmax weights, and mode 3 ends in
+out.mean(1) over a softmax-weighted sum, which is again a non-negative mixture. No such
+operation can represent a DIFFERENCE between phases -- yet the radiological basis for
+every subtype in this dataset is exactly a difference:
+
+    HCC          non-rim APHE then washout   -> E_arterial - E_portal is large positive
+    ICC          progressive enhancement     -> E_delayed - E_arterial is positive
+    haemangioma  peripheral nodular filling  -> a spatially structured difference
+    metastasis   rim enhancement             -> differs from both of the above
+
+A weighted average of the four phases destroys all of it and leaves only mean brightness.
+Measured consequence: our imaging-only model reached accuracy 0.620 (4-class) against
+0.706 for the dataset's own radiomics SVM, which concatenates per-phase features and can
+therefore form any difference linearly. Mode "diff" gives the network the same ability:
+the consecutive differences are supplied explicitly as extra streams, so washout is a
+linear read-out rather than something the encoder must somehow infer.
+
+Each stream (phase or difference) is normalised in its own GroupNorm group, because
+differences have a systematically smaller scale than the raw embeddings and would
+otherwise be swamped. The projection is a bottleneck (n_streams*C -> width -> C) to keep
+the added parameter count near 1.6M: with 412 training patients per fold the image branch
+already overfits (§6.3), so a full n_streams*C -> C conv at 4.1M was rejected.
 """
 from __future__ import annotations
 
@@ -24,22 +50,36 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+MODES = ("concat_stem", "attention", "cross_attention", "diff")
+
+
 class PhaseFusion(nn.Module):
     def __init__(
         self,
-        mode: str = "attention",
+        mode: str = "diff",
         n_phases: int = 4,
         embed_dim: int = 768,
         n_heads: int = 8,
+        width: int = 256,
     ):
         super().__init__()
-        if mode not in ("concat_stem", "attention", "cross_attention"):
-            raise ValueError(f"mode must be 'concat_stem'|'attention'|'cross_attention', got {mode!r}")
+        if mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
         self.mode = mode
         self.n_phases = n_phases
         self.embed_dim = embed_dim
+        self.out_dim = embed_dim          # every mode projects back to the backbone width
+        self.last_stream_weights = None   # (B, n_streams) relative magnitudes, "diff" mode
 
-        if mode == "concat_stem":
+        if mode == "diff":
+            # P raw phases + (P-1) consecutive differences
+            self.n_streams = 2 * n_phases - 1
+            ch = self.n_streams * embed_dim
+            self.stream_norm = nn.GroupNorm(self.n_streams, ch)   # one group per stream
+            self.proj = nn.Sequential(
+                nn.Conv3d(ch, width, kernel_size=1), nn.GELU(),
+                nn.Conv3d(width, embed_dim, kernel_size=1))
+        elif mode == "concat_stem":
             # (B, n_phases, D, H, W) -> (B, 1, D, H, W)
             self.stem = nn.Sequential(
                 nn.Conv3d(n_phases, 8, kernel_size=3, padding=1),
@@ -80,7 +120,37 @@ class PhaseFusion(nn.Module):
             return self._fuse_attention(phase_embeddings, phase_present)
         if self.mode == "cross_attention":
             return self._fuse_cross_attention(phase_embeddings, phase_present)
-        raise RuntimeError("fuse_embeddings requires 'attention' or 'cross_attention' mode.")
+        if self.mode == "diff":
+            return self._fuse_diff(phase_embeddings, phase_present)
+        raise RuntimeError("fuse_embeddings is not available in 'concat_stem' mode.")
+
+    def _fuse_diff(self, phase_embeddings: torch.Tensor, phase_present=None):
+        """Phases and their consecutive differences as separate streams.
+
+        Returns (fused (B,C,d,h,w), phase_weights (B,P)). The returned weights are the
+        relative magnitude of each PHASE stream, not attention weights -- there is no
+        attention here; the full per-stream magnitudes (phases and differences) are kept
+        in self.last_stream_weights for interpretation.
+        """
+        b, p, c, d, h, w = phase_embeddings.shape
+        streams = [phase_embeddings[:, i] for i in range(p)]
+        streams += [phase_embeddings[:, i] - phase_embeddings[:, i - 1] for i in range(1, p)]
+        x = torch.cat(streams, dim=1)                              # (B, n_streams*C, d,h,w)
+
+        if phase_present is not None:
+            # a difference is valid only when BOTH of its phases are real; an absent phase
+            # is zero-filled upstream, so E_i - E_j would otherwise be a spurious signal
+            ok = [phase_present[:, i] for i in range(p)]
+            ok += [phase_present[:, i] * phase_present[:, i - 1] for i in range(1, p)]
+            keep = torch.stack(ok, dim=1).to(x.dtype)              # (B, n_streams)
+            x = x * keep.repeat_interleave(c, dim=1)[:, :, None, None, None]
+
+        mag = x.detach().abs().flatten(2).mean(-1)                 # (B, n_streams*C)
+        mag = mag.reshape(b, self.n_streams, c).mean(-1)           # (B, n_streams)
+        self.last_stream_weights = mag / mag.sum(1, keepdim=True).clamp_min(1e-6)
+        ph = mag[:, :p]
+        weights = ph / ph.sum(1, keepdim=True).clamp_min(1e-6)     # (B, P), contract
+        return self.proj(self.stream_norm(x)), weights
 
     def _fuse_attention(self, phase_embeddings: torch.Tensor, phase_present=None):
         b, p, c, d, h, w = phase_embeddings.shape

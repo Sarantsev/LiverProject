@@ -39,6 +39,7 @@ from torch.utils.data import DataLoader
 
 from liver_sppvr.baselines import BASELINES, build_baseline
 from liver_sppvr.data import MultiPhaseLiverDataset, collate_multiphase, load_manifest
+from liver_sppvr.models.multiphase import MODES as FUSION_MODES
 from liver_sppvr.data.clinical import feat_dim, load_clinical
 from liver_sppvr.data.dataset import load_pred_masks
 from liver_sppvr.train.build import (build_classifier, class_weights, load_config,
@@ -194,6 +195,10 @@ def main() -> int:
     ap.add_argument("--mask-noise", type=float, default=None, help="train-time mask perturbation prob (default cfg)")
     ap.add_argument("--roi", default=None, choices=("none", "body", "pred"),
                     help="ROI crop; default: pred when --mask-source pred, else config preprocess.roi")
+    ap.add_argument("--fusion", default=None, choices=FUSION_MODES,
+                    help="multi-phase fusion (ours; default cfg multiphase.fusion). "
+                         "diff keeps contrast dynamics; attention/cross_attention cannot "
+                         "represent a phase difference at all -- use them for the ablation row")
     ap.add_argument("--supcon", type=float, default=None, help="SupCon weight (ours; default cfg)")
     ap.add_argument("--aux-weight", type=float, default=None,
                     help="weight of the per-modality auxiliary losses (ours; default cfg)")
@@ -234,6 +239,8 @@ def main() -> int:
     # default picked at this level would override it (dora on a conv encoder crashes).
     # build_classifier resolves None as: backbone config block -> backbone default.
     args.mask_source = args.mask_source or ccfg.get("mask_source", "pred")
+    if args.fusion:                                   # CLI overrides the config for ablations
+        cfg["multiphase"]["fusion"] = args.fusion
     args.clinical_csv = args.clinical_csv or cfg["data"].get("clinical_csv") or None
     args.pred_masks = args.pred_masks or cfg["data"].get("pred_masks_csv") or None
     args.resize = tuple(int(x) for x in args.resize.split(",")) if args.resize else None
