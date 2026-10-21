@@ -96,3 +96,23 @@ def test_diff_parameter_count_stays_near_budget():
     f = PhaseFusion(mode="diff", n_phases=4, embed_dim=768, width=256)
     n = sum(p.numel() for p in f.parameters())
     assert 1.2e6 < n < 2.0e6, f"diff fusion has {n/1e6:.2f}M params"
+
+
+# --------------------------------------------------------------------- AMP dtypes
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+def test_masked_pool_accepts_half_embeddings(dtype):
+    """Regression: under AMP the fused map is fp16 because `diff` ends in a Conv3d.
+
+    The mask is float32, so `embedding * mask` promotes to float32, while the empty-mask
+    GAP fallback stayed fp16 -- index_put_ then raised
+    "Index put requires the source and destination dtypes match".
+    """
+    from liver_sppvr.models.cls_head import TumorClassificationHead
+    head = TumorClassificationHead(embed_dim=C, num_classes=3, hidden_dim=16, pool="masked")
+    emb = torch.randn(2, C, D, H, W, dtype=dtype)
+    mask = torch.zeros(2, 1, D * 4, H * 4, W * 4)          # fully empty -> GAP fallback
+    mask[0, :, :2] = 1.0                                   # one real, one empty
+    with torch.no_grad():
+        pooled = head._masked_pool(emb, mask)
+    assert pooled.shape == (2, C) and pooled.dtype == torch.float32
+    assert torch.isfinite(pooled).all()

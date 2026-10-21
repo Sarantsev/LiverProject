@@ -104,10 +104,15 @@ class TumorClassificationHead(nn.Module):
             mask = F.adaptive_max_pool3d(mask.float(), (d, h, w))
         mask = (mask > 0.5).float()
         denom = mask.flatten(2).sum(-1).clamp_min(1.0)
-        pooled = (embedding * mask).flatten(2).sum(-1) / denom
+        # float32 accumulation: summing ~2k cells in fp16 loses precision, and the mask being
+        # float32 promotes the product anyway. The GAP fallback must then be cast to match --
+        # under AMP the embedding is fp16 (the fusion projection ends in a Conv3d), and an
+        # fp16 source into an fp32 destination makes the index_put_ raise.
+        pooled = (embedding.float() * mask).flatten(2).sum(-1) / denom
         empty = mask.flatten(2).sum(-1).squeeze(1) < 1.0          # empty mask -> GAP
         if empty.any():
-            pooled[empty] = embedding.flatten(2).mean(-1)[empty]
+            gap = embedding.float().flatten(2).mean(-1)
+            pooled[empty] = gap[empty]
         return pooled
 
     def _modality_dropout(self, img, clin):
