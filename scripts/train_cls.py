@@ -39,9 +39,10 @@ from torch.utils.data import DataLoader
 
 from liver_sppvr.baselines import BASELINES, build_baseline
 from liver_sppvr.data import MultiPhaseLiverDataset, collate_multiphase, load_manifest
+from liver_sppvr.models.cls_head import POOLS
 from liver_sppvr.models.multiphase import MODES as FUSION_MODES
 from liver_sppvr.data.clinical import feat_dim, load_clinical
-from liver_sppvr.data.dataset import load_pred_masks
+from liver_sppvr.data.dataset import ROI_MODES, load_pred_masks
 from liver_sppvr.train.build import (build_classifier, class_weights, load_config,
                                      make_scheduler, set_seed)
 from liver_sppvr.train.engine import evaluate, forward_batch
@@ -193,8 +194,16 @@ def main() -> int:
                     help="ours: none | gt | pred (default from config)")
     ap.add_argument("--pred-masks", default=None, help="pred_masks.csv (out-of-fold masks) for --mask-source pred")
     ap.add_argument("--mask-noise", type=float, default=None, help="train-time mask perturbation prob (default cfg)")
-    ap.add_argument("--roi", default=None, choices=("none", "body", "pred"),
-                    help="ROI crop; default: pred when --mask-source pred, else config preprocess.roi")
+    ap.add_argument("--roi", default=None, choices=ROI_MODES,
+                    help="ROI crop; default: pred when --mask-source pred, else config "
+                         "preprocess.roi. roi=gt crops around the RADIOLOGIST mask, i.e. the "
+                         "semi-automatic protocol of the published benchmarks -- a control, "
+                         "not part of the automatic pipeline")
+    ap.add_argument("--pool", default=None, choices=POOLS,
+                    help="ours: how the fused map is reduced over the mask (default cfg "
+                         "classifier.pool). masked = mean; masked_std = [mean, std], which "
+                         "keeps the INTRA-lesion heterogeneity a mean throws away; gap is "
+                         "forced anyway when --mask-source none")
     ap.add_argument("--fusion", default=None, choices=FUSION_MODES,
                     help="multi-phase fusion (ours; default cfg multiphase.fusion). "
                          "diff keeps contrast dynamics; attention/cross_attention cannot "
@@ -241,6 +250,8 @@ def main() -> int:
     args.mask_source = args.mask_source or ccfg.get("mask_source", "pred")
     if args.fusion:                                   # CLI overrides the config for ablations
         cfg["multiphase"]["fusion"] = args.fusion
+    if args.pool:
+        cfg["classifier"]["pool"] = args.pool
     args.clinical_csv = args.clinical_csv or cfg["data"].get("clinical_csv") or None
     args.pred_masks = args.pred_masks or cfg["data"].get("pred_masks_csv") or None
     args.resize = tuple(int(x) for x in args.resize.split(",")) if args.resize else None

@@ -45,7 +45,7 @@ class LiverTumorClassifier(nn.Module):
 
     @property
     def uses_mask(self) -> bool:
-        return self.head.pool == "masked"
+        return self.head.pool != "gap"
 
     def encode_multiphase(self, phases: torch.Tensor, phase_present=None):
         """(B,P,1,D,H,W) -> fused (B,C,d,h,w), phase_weights (B,P)|None."""

@@ -7,7 +7,7 @@ from torch.utils.data import Dataset
 
 from .preprocess import load_ct, load_mask
 
-ROI_MODES = ("none", "body", "pred")
+ROI_MODES = ("none", "body", "pred", "gt")
 
 
 def load_pred_masks(csv_path: str) -> dict:
@@ -27,7 +27,14 @@ class MultiPhaseLiverDataset(Dataset):
         without an override raises, so GT can never leak in silently.
     roi: 'none' | 'body' (crop the body by intensity, SegVol CropForeground) |
          'pred' (crop around the OVERRIDE mask -> the tumour fills the window; needs
-         mask_override; never derived from GT).
+         mask_override; never derived from GT) |
+         'gt' (crop around the GROUND-TRUTH mask). 'gt' is deliberately separate from 'pred':
+         it uses a radiologist annotation at inference time, so it is NOT part of the fully
+         automatic pipeline and must never back a headline claim. It exists to reproduce the
+         semi-automatic protocol the published benchmarks use (U-Net draft corrected by a
+         radiologist), which is the only way to tell mask quality apart from method. It
+         refuses to run together with mask_override, where it would silently crop around the
+         predicted mask instead.
     mask_noise: train-time probability of perturbing the mask (dilate/erode/shift/drop)
         so a classifier trained on masks stays robust to segmentation errors.
     clinical: {patient_id: np.float32 vector} -> item['clinical'].
@@ -54,7 +61,10 @@ class MultiPhaseLiverDataset(Dataset):
             raise ValueError(f"roi must be one of {ROI_MODES}, got {roi!r}")
         if roi == "pred" and not mask_override:
             raise ValueError("roi='pred' needs mask_override (predicted masks); "
-                             "a GT-derived ROI is a leak and is not supported")
+                             "for a deliberate ground-truth crop ask for roi='gt'")
+        if roi == "gt" and mask_override:
+            raise ValueError("roi='gt' with mask_override would crop around the PREDICTED "
+                             "mask and silently mislabel the run; use roi='pred'")
         self.class_merge = class_merge or {}
         self.class_names = list(class_names)
         self.class_to_idx = {c: i for i, c in enumerate(self.class_names)}
@@ -92,7 +102,9 @@ class MultiPhaseLiverDataset(Dataset):
 
     def _frac_box(self, rec: dict):
         """One fractional box per patient, applied identically to every phase + mask."""
-        if self.roi == "pred":
+        # 'pred' and 'gt' are the same operation on a different mask: mask_path is the override
+        # when one was given, and the constructor has already ruled out the mismatched pairings.
+        if self.roi in ("pred", "gt"):
             from .preprocess import bbox_fraction_from_mask
             return bbox_fraction_from_mask(rec["mask_path"], margin=self.roi_margin)
         if self.roi == "body":

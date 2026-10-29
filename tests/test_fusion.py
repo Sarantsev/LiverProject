@@ -99,8 +99,9 @@ def test_diff_parameter_count_stays_near_budget():
 
 
 # --------------------------------------------------------------------- AMP dtypes
+@pytest.mark.parametrize("pool,width", [("masked", 1), ("masked_std", 2)])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
-def test_masked_pool_accepts_half_embeddings(dtype):
+def test_masked_pool_accepts_half_embeddings(dtype, pool, width):
     """Regression: under AMP the fused map is fp16 because `diff` ends in a Conv3d.
 
     The mask is float32, so `embedding * mask` promotes to float32, while the empty-mask
@@ -108,11 +109,70 @@ def test_masked_pool_accepts_half_embeddings(dtype):
     "Index put requires the source and destination dtypes match".
     """
     from liver_sppvr.models.cls_head import TumorClassificationHead
-    head = TumorClassificationHead(embed_dim=C, num_classes=3, hidden_dim=16, pool="masked")
+    head = TumorClassificationHead(embed_dim=C, num_classes=3, hidden_dim=16, pool=pool)
     emb = torch.randn(2, C, D, H, W, dtype=dtype)
     mask = torch.zeros(2, 1, D * 4, H * 4, W * 4)          # fully empty -> GAP fallback
     mask[0, :, :2] = 1.0                                   # one real, one empty
     with torch.no_grad():
         pooled = head._masked_pool(emb, mask)
-    assert pooled.shape == (2, C) and pooled.dtype == torch.float32
+    assert pooled.shape == (2, C * width) and pooled.dtype == torch.float32
     assert torch.isfinite(pooled).all()
+
+
+# ------------------------------------------------------------------- mean+std pooling
+def _head(pool, **kw):
+    from liver_sppvr.models.cls_head import TumorClassificationHead
+    return TumorClassificationHead(embed_dim=C, num_classes=3, hidden_dim=16, pool=pool, **kw)
+
+
+def test_masked_std_separates_lesions_a_mean_cannot():
+    """Two lesions with the SAME mean but different internal heterogeneity.
+
+    This is the reason the mode exists: a homogeneous lesion and a necrotic/mosaic one can
+    share a mean, and `pool='masked'` maps both to the same vector.
+    """
+    mask = torch.zeros(2, 1, D, H, W)
+    mask[:, :, 0] = 1.0                                    # same tumour cells in both samples
+    n = int(mask[0].sum().item())                          # tumour cells per sample
+    emb = torch.zeros(2, C, D, H, W)
+    emb[0, :, 0] = 1.0                                     # uniform lesion, mean 1
+    hi = W                                                 # cells raised in sample 1
+    emb[1, :, 0, 0] = 2.0                                  # heterogeneous lesion, SAME mean:
+    emb[1, :, 0, 1:] = (n - hi * 2.0) / (n - hi)           # the rest absorbs the excess
+    with torch.no_grad():
+        m = _head("masked")._masked_pool(emb, mask)
+        ms = _head("masked_std")._masked_pool(emb, mask)
+    assert torch.allclose(m[0], m[1], atol=1e-4), "means must coincide for the test to mean anything"
+    assert not torch.allclose(ms[0], ms[1], atol=1e-3), "masked_std failed to separate them"
+
+
+def test_masked_std_is_zero_on_a_uniform_lesion():
+    """No heterogeneity -> the std half is exactly zero, and the mean half is unchanged."""
+    mask = torch.zeros(1, 1, D, H, W)
+    mask[:, :, 0] = 1.0
+    emb = torch.zeros(1, C, D, H, W)
+    emb[:, :, 0] = 3.0
+    with torch.no_grad():
+        out = _head("masked_std")._masked_pool(emb, mask)
+    mean, std = out[:, :C], out[:, C:]
+    assert torch.allclose(mean, torch.full_like(mean, 3.0), atol=1e-5)
+    assert torch.allclose(std, torch.zeros_like(std), atol=1e-5)
+
+
+def test_masked_std_head_sizes_itself_on_2c():
+    """Everything downstream of the pooling must size on 2C, not on embed_dim."""
+    head = _head("masked_std", extra_feat_dim=4, clinical_hidden=6)
+    assert head.img_dim == 2 * C
+    assert head.img_proj[1].in_features == 2 * C
+    assert head.aux_img.in_features == 2 * C
+    assert head.gate.in_features == 2 * C + 6
+    emb = torch.randn(2, C, D, H, W)
+    mask = torch.ones(2, 1, D, H, W)
+    with torch.no_grad():
+        logits = head.eval()(emb, mask=mask, extra_feat=torch.randn(2, 4))
+    assert logits.shape == (2, 3)
+
+
+def test_pool_rejects_unknown_mode():
+    with pytest.raises(ValueError):
+        _head("masked_mean_std")

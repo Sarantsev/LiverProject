@@ -30,6 +30,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 HEADS = ("gated", "concat")
+POOLS = ("masked", "masked_std", "gap")
 
 
 class TumorClassificationHead(nn.Module):
@@ -39,7 +40,7 @@ class TumorClassificationHead(nn.Module):
         num_classes: int = 5,
         hidden_dim: int = 256,
         dropout: float = 0.3,
-        pool: str = "masked",           # "masked" | "gap"
+        pool: str = "masked",           # "masked" | "masked_std" | "gap"
         extra_feat_dim: int = 0,        # clinical/tabular width; 0 = image only
         clinical_hidden: int = 64,      # tabular encoder width (concat head: 0 = raw)
         head: str = "gated",            # "gated" (GMU) | "concat" (legacy)
@@ -49,14 +50,19 @@ class TumorClassificationHead(nn.Module):
         proj_dim: int = 128,            # projection for the supervised contrastive loss
     ):
         super().__init__()
-        if pool not in ("masked", "gap"):
-            raise ValueError(f"pool must be 'masked' or 'gap', got {pool!r}")
+        if pool not in POOLS:
+            raise ValueError(f"pool must be one of {POOLS}, got {pool!r}")
         if head not in HEADS:
             raise ValueError(f"head must be one of {HEADS}, got {head!r}")
         self.pool = pool
         self.head_kind = head
         self.extra_feat_dim = extra_feat_dim
         self.img_drop, self.clin_drop = img_drop, clin_drop
+        # pool='masked_std' concatenates the second moment, so the IMAGE vector is 2C wide
+        # while the backbone still produces C channels. Everything downstream of the pooling
+        # must size itself on img_dim, not on embed_dim.
+        img_dim = embed_dim * (2 if pool == "masked_std" else 1)
+        self.img_dim = img_dim
 
         # --- tabular encoder (no input LayerNorm: the columns are already z-scored on the
         # training fold, and normalising ACROSS them would mix unrelated units) ---
@@ -70,23 +76,23 @@ class TumorClassificationHead(nn.Module):
         clin_out = clinical_hidden if self.clin is not None else extra_feat_dim
 
         if head == "concat":                         # legacy: one MLP over [image, clinical]
-            in_dim = embed_dim + clin_out
+            in_dim = img_dim + clin_out
             self.fuse_dim = in_dim
             self.mlp = nn.Sequential(
                 nn.LayerNorm(in_dim), nn.Linear(in_dim, hidden_dim), nn.GELU(),
                 nn.Dropout(dropout), nn.Linear(hidden_dim, num_classes))
         else:                                        # GMU
             self.fuse_dim = fuse_dim
-            self.img_proj = nn.Sequential(nn.LayerNorm(embed_dim),
-                                          nn.Linear(embed_dim, fuse_dim), nn.Tanh())
+            self.img_proj = nn.Sequential(nn.LayerNorm(img_dim),
+                                          nn.Linear(img_dim, fuse_dim), nn.Tanh())
             if clin_out:
                 self.clin_proj = nn.Sequential(nn.Linear(clin_out, fuse_dim), nn.Tanh())
-                self.gate = nn.Linear(embed_dim + clin_out, fuse_dim)
+                self.gate = nn.Linear(img_dim + clin_out, fuse_dim)
             self.mlp = nn.Sequential(
                 nn.LayerNorm(fuse_dim), nn.Linear(fuse_dim, hidden_dim), nn.GELU(),
                 nn.Dropout(dropout), nn.Linear(hidden_dim, num_classes))
             # auxiliary classifiers: each modality must stand on its own
-            self.aux_img = nn.Linear(embed_dim, num_classes)
+            self.aux_img = nn.Linear(img_dim, num_classes)
             self.aux_clin = nn.Linear(clin_out, num_classes) if clin_out else None
 
         self.proj = nn.Sequential(nn.Linear(self.fuse_dim, self.fuse_dim), nn.GELU(),
@@ -94,26 +100,43 @@ class TumorClassificationHead(nn.Module):
         self.last_gate = None            # mean gate value per sample, for interpretability
 
     # ------------------------------------------------------------------ pooling
-    @staticmethod
-    def _masked_pool(embedding: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """Mean of the embedding over the mask voxels. embedding (B,C,d,h,w), mask (B,1,...)."""
+    def _masked_pool(self, embedding: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Pool the embedding over the mask voxels. embedding (B,C,d,h,w), mask (B,1,...).
+
+        pool='masked'     -> mean over the tumour cells            (B,C)
+        pool='masked_std' -> [mean, std] over the tumour cells      (B,2C)
+
+        The second moment is not decoration. Necrosis, the peripheral nodular filling of a
+        haemangioma and the mosaic pattern of HCC are VARIANCE phenomena INSIDE the lesion: the
+        lesion is diagnostic because it is non-uniform. A mean over the mask is blind to them in
+        exactly the way a convex combination of phases is blind to a phase difference (see
+        models/multiphase.py) -- one level down, over voxels instead of over phases.
+        """
         b, c, d, h, w = embedding.shape
         if mask.shape[2:] != (d, h, w):
             # max-pool to the embedding grid: a cell is tumour if ANY fine voxel in it is
             # (trilinear + threshold would drop small tumours into a silent GAP fallback)
             mask = F.adaptive_max_pool3d(mask.float(), (d, h, w))
         mask = (mask > 0.5).float()
-        denom = mask.flatten(2).sum(-1).clamp_min(1.0)
+        n = mask.flatten(2).sum(-1)                               # (B,1) tumour cells
+        denom = n.clamp_min(1.0)
         # float32 accumulation: summing ~2k cells in fp16 loses precision, and the mask being
-        # float32 promotes the product anyway. The GAP fallback must then be cast to match --
-        # under AMP the embedding is fp16 (the fusion projection ends in a Conv3d), and an
-        # fp16 source into an fp32 destination makes the index_put_ raise.
-        pooled = (embedding.float() * mask).flatten(2).sum(-1) / denom
-        empty = mask.flatten(2).sum(-1).squeeze(1) < 1.0          # empty mask -> GAP
-        if empty.any():
-            gap = embedding.float().flatten(2).mean(-1)
-            pooled[empty] = gap[empty]
-        return pooled
+        # float32 promotes the product anyway. torch.where (rather than an indexed write) keeps
+        # the fallback in the same dtype -- an fp16 source into an fp32 destination made the
+        # former index_put_ raise under AMP, since the fusion projection ends in a Conv3d.
+        x = embedding.float().flatten(2)
+        m = mask.flatten(2)
+        mean = (x * m).sum(-1) / denom
+        empty = (n.squeeze(1) < 1.0)[:, None]                     # empty mask -> GAP fallback
+        mean = torch.where(empty, x.mean(-1), mean)
+        if self.pool == "masked":
+            return mean
+        # E[x^2] - E[x]^2 over the same cells; clamp because catastrophic cancellation can
+        # push a near-uniform lesion a hair below zero.
+        var = (x.pow(2) * m).sum(-1) / denom - mean.pow(2)
+        std = var.clamp_min(0.0).sqrt()
+        std = torch.where(empty, x.std(-1, unbiased=False), std)
+        return torch.cat([mean, std], dim=1)
 
     def _modality_dropout(self, img, clin):
         """Zero each branch independently per sample (train only), never both at once."""
@@ -135,12 +158,12 @@ class TumorClassificationHead(nn.Module):
         return_extras: also return {'proj', 'aux_img', 'aux_clin', 'gate'} (training).
         return_proj:   legacy shorthand returning (logits, proj).
         """
-        if self.pool == "masked":
-            if mask is None:
-                raise ValueError("pool='masked' requires a mask (B,1,D,H,W).")
-            img = self._masked_pool(embedding, mask)
-        else:
+        if self.pool == "gap":
             img = embedding.flatten(2).mean(-1)
+        else:
+            if mask is None:
+                raise ValueError(f"pool={self.pool!r} requires a mask (B,1,D,H,W).")
+            img = self._masked_pool(embedding, mask)
 
         clin = None
         if self.extra_feat_dim > 0:

@@ -28,13 +28,24 @@ multiphase:
 preprocess:
   roi: body                           # none | body (intensity crop, SegVol CropForeground) |
                                       # pred (crop around the PREDICTED mask -> tumour fills the window;
-                                      #       never derived from GT)
+                                      #       never derived from GT) |
+                                      # gt (crop around the RADIOLOGIST mask -- the semi-automatic
+                                      #     protocol of the published benchmarks. A control for
+                                      #     separating mask quality from method; never a headline
+                                      #     number, since it needs an annotation at inference)
   roi_margin: 0.5                     # context around the tumour for roi=pred (fraction of extent)
 
 # --- Classifier (ours) ---
 classifier:
   backbone: segvol                    # segvol | merlin -- two pretrained CT encoders compared head-to-head
   mask_source: pred                   # none (GAP, image-only) | gt (semi-auto upper bound) | pred (fully-auto)
+  pool: masked                        # masked (mean over the tumour cells) | masked_std
+                                      # ([mean, std], doubles the image vector to 2C). The mean
+                                      # alone is blind to INTRA-lesion heterogeneity -- necrosis,
+                                      # the nodular filling of a haemangioma, the mosaic pattern
+                                      # of HCC -- which is variance, not a shift of the mean.
+                                      # Ignored (forced to gap) when mask_source=none.
+                                      # All results up to 2026-10-28 used `masked`.
   num_classes: 5
   class_names: [HCC, ICC, CRLM, BCLM, HH]
   class_merge: {}                     # {} = the 5-class task. {Metastasis: [CRLM, BCLM]} gives

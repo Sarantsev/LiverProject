@@ -63,6 +63,9 @@ def build_classifier(cfg: dict, device, *, backbone: str | None = None,
     # silently follow --backbone across incompatible models. Resolution order: explicit
     # argument -> that backbone's config block -> the backbone's own default.
     finetune = finetune or bcfg.get("finetune") or bb.default_finetune
+    # Without a mask there is nothing to pool over, so mask_source=none forces GAP whatever
+    # the config says; otherwise classifier.pool chooses between mean and [mean, std].
+    pool = "gap" if mask_source == "none" else ccfg.get("pool", "masked")
     ft_cfg = dict(bcfg.get("lora", {}))
     ft_cfg["partial_targets"] = bcfg.get("partial_targets")
     bb.set_finetune(finetune, ft_cfg)
@@ -70,7 +73,7 @@ def build_classifier(cfg: dict, device, *, backbone: str | None = None,
         bb, num_classes=num_classes, n_phases=len(mp["phases"]),
         fusion_mode=mp.get("fusion", "diff"), fusion_width=mp.get("fusion_width", 256),
         hidden_dim=ccfg["hidden_dim"],
-        dropout=ccfg["dropout"], pool=("gap" if mask_source == "none" else "masked"),
+        dropout=ccfg["dropout"], pool=pool,
         extra_feat_dim=clinical_dim, clinical_hidden=ccfg.get("clinical_hidden", 0),
         head=ccfg.get("head", "concat"),            # absent key = old checkpoint
         fuse_dim=ccfg.get("fuse_dim", 256),
@@ -78,7 +81,7 @@ def build_classifier(cfg: dict, device, *, backbone: str | None = None,
     clin_h = ccfg.get("clinical_hidden", 0)
     clin_desc = f"{clinical_dim}->{clin_h}" if (clinical_dim and clin_h) else str(clinical_dim)
     print(f"classifier: backbone={backbone} classes={num_classes} finetune={finetune} "
-          f"mask_source={mask_source} "
+          f"mask_source={mask_source} pool={pool} "
           f"clinical={clin_desc} head={ccfg.get('head', 'concat')} "
           f"modality_drop=img{ccfg.get('img_drop', 0.0)}/clin{ccfg.get('clin_drop', 0.0)} "
           f"fusion={mp.get('fusion', 'diff')}")
