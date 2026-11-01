@@ -34,7 +34,7 @@ from liver_sppvr.train.splits import (labels_from_manifest, make_kfold_splits,
                                       merged_class_names, parse_class_merge)
 from liver_sppvr.utils.device import resolve_device
 
-DICE_BINS = ((0.0, 0.3), (0.3, 0.6), (0.6, 1.01))
+DICE_BINS = ((0.0, 0.3), (0.3, 0.6), (0.6, 1.0 + 1e-8))
 
 
 def _native_dice(pred_path: str, gt_path: str) -> float:
@@ -65,12 +65,12 @@ def main() -> int:
     device = resolve_device(args.device or cfg.get("device", "auto"))
     use_amp = args.amp and getattr(device, "type", str(device)) == "cuda"
     ccfg, pcfg = cfg["classifier"], cfg.get("preprocess", {})
-    merge = parse_class_merge(targs0.get("class_merge") or ccfg.get("class_merge"))
-    class_names = merged_class_names(ccfg["class_names"], merge) if merge else ccfg["class_names"]
-    num_classes = len(class_names)
     # the training run recorded its own task formulation; honour it
     _ck0 = torch.load(os.path.join(args.cls_dir, "fold0", "best.pth"), map_location="cpu")
     targs0 = _ck0.get("args", {})
+    merge = parse_class_merge(targs0.get("class_merge") or ccfg.get("class_merge"))
+    class_names = merged_class_names(ccfg["class_names"], merge) if merge else ccfg["class_names"]
+    num_classes = len(class_names)
     man = load_manifest(args.manifest or cfg["data"]["manifest"])
     labels = labels_from_manifest(man, ccfg["class_names"], merge)
     # folds always come from the ORIGINAL classes (see train/splits.py)
