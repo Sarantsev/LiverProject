@@ -51,6 +51,11 @@ def export(args, cfg) -> int:
     man = load_manifest(args.manifest or cfg["data"]["manifest"])
     class_names = cfg["classifier"]["class_names"]
     labels = labels_from_manifest(man, class_names)
+    if args.kfold < 2 or args.kfold > min(list(labels.values()).count(y) for y in set(labels.values())):
+        raise ValueError("kfold must be at least 2 and no larger than the smallest class")
+    phases = getattr(args, "phases", None) or [args.phase]
+    if len(set(phases)) != len(phases):
+        raise ValueError("Duplicate input phases")
     splits = make_kfold_splits(labels, k=args.kfold, seed=cfg["project"]["seed"])
     if args.dump_splits:
         dump_splits(splits, args.dump_splits)
@@ -59,34 +64,63 @@ def export(args, cfg) -> int:
     out = os.path.abspath(args.out)
     img_dir, lab_dir = os.path.join(out, "imagesTr"), os.path.join(out, "labelsTr")
     os.makedirs(img_dir, exist_ok=True); os.makedirs(lab_dir, exist_ok=True)
-    rows, skipped = [], []
+    rows, skipped, cases = [], [], []
+    seen = set()
     for pid, grp in man.groupby("patient_id"):
         if pid not in labels:
             continue
-        sel = grp[grp["phase"] == args.phase]
-        if sel.empty:
-            skipped.append((pid, f"no {args.phase} phase")); continue
-        img_path = os.path.abspath(sel["image_path"].iloc[0])
         mask_path = os.path.abspath(grp["mask_path"].iloc[0])
-        img, msk = nib.load(img_path), nib.load(mask_path)
-        if img.shape != msk.shape or not np.allclose(img.affine, msk.affine, atol=1e-3):
-            skipped.append((pid, f"image/mask geometry differs {img.shape} vs {msk.shape}")); continue
+        msk = nib.load(mask_path)
+        paths = []
+        for phase in phases:
+            sel = grp[grp["phase"] == phase]
+            if len(sel) != 1:
+                raise ValueError(f"{pid}: expected exactly one {phase} image, found {len(sel)}")
+            path = os.path.abspath(sel["image_path"].iloc[0])
+            img = nib.load(path)
+            if len(img.shape) != 3 or img.shape != msk.shape or not np.allclose(img.affine, msk.affine, atol=1e-3):
+                raise ValueError(f"{pid}/{phase}: geometry differs from mask; use registered images")
+            paths.append(path)
         cid = case_id(pid)
-        dst_img = os.path.join(img_dir, f"{cid}_0000.nii.gz")
-        if os.path.lexists(dst_img):
-            os.remove(dst_img)
-        if args.copy:
-            nib.save(nib.Nifti1Image(np.asarray(img.dataobj).astype(np.float32), img.affine), dst_img)
-        else:
-            os.symlink(img_path, dst_img)
+        if cid in seen:
+            raise ValueError(f"Case identifier collision: {cid}")
+        seen.add(cid)
+        cases.append((cid, paths, mask_path, pid))
+        rows.append((pid, cid, class_names[labels[pid]], mask_path))
+    # Validate every case before writing images. Re-exporting a different cohort or
+    # channel layout into an existing dataset would leave stale nnU-Net inputs.
+    meta_path = os.path.join(out, "experiment.json")
+    metadata = {"phases": phases, "patients": [r[0] for r in rows],
+                "kfold": args.kfold, "seed": cfg["project"]["seed"]}
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            if json.load(f) != metadata:
+                raise ValueError("Dataset already contains a different cohort/channel layout; choose a new output")
+    expected = {f"{cid}_{c:04d}.nii.gz" for cid, paths, _, _ in cases for c in range(len(paths))}
+    if set(os.listdir(img_dir)) - expected:
+        raise ValueError("Stale image channels in output; choose a new dataset directory")
+    if set(os.listdir(lab_dir)) - {f"{cid}.nii.gz" for cid, _, _, _ in cases}:
+        raise ValueError("Stale labels in output; choose a new dataset directory")
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    for cid, paths, mask_path, pid in cases:
+        msk = nib.load(mask_path)
+        for c, path in enumerate(paths):
+            dst_img = os.path.join(img_dir, f"{cid}_{c:04d}.nii.gz")
+            if os.path.lexists(dst_img):
+                os.remove(dst_img)
+            if args.copy:
+                img = nib.load(path)
+                nib.save(nib.Nifti1Image(np.asarray(img.dataobj).astype(np.float32), img.affine), dst_img)
+            else:
+                os.symlink(path, dst_img)
         lab = (np.asarray(msk.dataobj) > 0).astype(np.uint8)          # exactly {0,1}
         nib.save(nib.Nifti1Image(lab, msk.affine), os.path.join(lab_dir, f"{cid}.nii.gz"))
-        rows.append((pid, cid, class_names[labels[pid]], mask_path))
     with open(os.path.join(out, "pid_map.csv"), "w", newline="") as f:
         w = csv.writer(f); w.writerow(["patient_id", "case_id", "tumor_type", "gt_mask_path"]); w.writerows(rows)
     with open(os.path.join(out, "dataset.json"), "w") as f:
-        json.dump({"name": os.path.basename(out), "description": "MCT-LTDiag liver tumour, portal phase",
-                   "channel_names": {"0": "CT"}, "labels": {"background": 0, "tumor": 1},
+        json.dump({"name": os.path.basename(out), "description": "MCT-LTDiag liver tumour: " + ", ".join(phases),
+                   "channel_names": {str(i): "CT" for i in range(len(phases))}, "labels": {"background": 0, "tumor": 1},
                    "numTraining": len(rows), "file_ending": ".nii.gz"}, f, indent=2)
 
     # our folds -> nnU-Net's splits_final.json (+ per-fold val dirs for OOF prediction)
@@ -95,15 +129,27 @@ def export(args, cfg) -> int:
                   "val": [pid2cid[p] for p in va if p in pid2cid]} for tr, va in splits]
     pre = os.path.abspath(args.preprocessed_dir or out.replace("nnUNet_raw", "nnUNet_preprocessed"))
     os.makedirs(pre, exist_ok=True)
+    split_path = os.path.join(pre, "splits_final.json")
+    if os.path.exists(split_path):
+        with open(split_path) as f:
+            if json.load(f) != nn_splits:
+                raise ValueError("Existing nnU-Net folds differ; use a new dataset directory")
+    for i, s in enumerate(nn_splits):
+        d = os.path.join(out, "oof", f"fold{i}")
+        expected = {f"{cid}_{c:04d}.nii.gz" for cid in s["val"] for c in range(len(phases))}
+        if os.path.isdir(d) and set(os.listdir(d)) - expected:
+            raise ValueError(f"Stale OOF validation inputs in {d}; choose a new dataset directory")
     with open(os.path.join(pre, "splits_final.json"), "w") as f:
         json.dump(nn_splits, f, indent=1)
     for i, s in enumerate(nn_splits):
         d = os.path.join(out, "oof", f"fold{i}"); os.makedirs(d, exist_ok=True)
         for cid in s["val"]:
-            dst = os.path.join(d, f"{cid}_0000.nii.gz")
-            if os.path.lexists(dst):
-                os.remove(dst)
-            os.symlink(os.path.join(img_dir, f"{cid}_0000.nii.gz"), dst)
+            for c in range(len(phases)):
+                name = f"{cid}_{c:04d}.nii.gz"
+                dst = os.path.join(d, name)
+                if os.path.lexists(dst):
+                    os.remove(dst)
+                os.symlink(os.path.join(img_dir, name), dst)
     print(f"exported {len(rows)} cases -> {out} | splits_final.json -> {pre} "
           f"(folds: {[len(s['val']) for s in nn_splits]} val cases) | skipped {len(skipped)}")
     for pid, why in skipped:
@@ -128,10 +174,11 @@ def collect(args, cfg) -> int:
         for cid in s["val"]:
             pred = os.path.join(os.path.abspath(args.pred_dir), f"fold{i}", f"{cid}.nii.gz")
             if not os.path.exists(pred):
-                print(f"  MISSING prediction: {pred}"); continue
-            gt = np.asarray(nib.load(cid2row[cid]["gt_mask_path"]).dataobj)
-            pr = np.asarray(nib.load(pred).dataobj)
-            if gt.shape != pr.shape:
+                raise FileNotFoundError(f"Missing OOF prediction: {pred}")
+            gt_img = nib.load(cid2row[cid]["gt_mask_path"])
+            pr_img = nib.load(pred)
+            gt, pr = np.asarray(gt_img.dataobj), np.asarray(pr_img.dataobj)
+            if gt.shape != pr.shape or not np.allclose(gt_img.affine, pr_img.affine, atol=1e-3):
                 raise RuntimeError(f"{cid}: prediction shape {pr.shape} != GT {gt.shape}")
             d = _dice(gt, pr); dices.append(d)
             rows.append({"patient_id": cid2row[cid]["patient_id"], "pred_mask_path": pred,
@@ -143,7 +190,7 @@ def collect(args, cfg) -> int:
         w.writeheader(); w.writerows(rows)
     means = [float(np.mean(d)) for d in per_fold if d]
     all_d = [float(r["dice"]) for r in rows]
-    summary = {"model": "nnunet-3d_fullres", "kfold": len(nn_splits),
+    summary = {"model": getattr(args, "model_name", "nnunet-3d_fullres"), "kfold": len(nn_splits),
                "per_fold": [{"fold": i, "dice": m, "n": len(per_fold[i])} for i, m in enumerate(means)],
                "mean_std": {"dice": {"mean": float(np.mean(means)), "std": float(np.std(means))}},
                "per_patient": {"mean": float(np.mean(all_d)), "std": float(np.std(all_d)), "n": len(all_d),
@@ -168,6 +215,8 @@ def main() -> int:
     ap.add_argument("--out", required=True, help="nnUNet_raw/<DatasetXXX_Name>")
     ap.add_argument("--preprocessed-dir", default=None, help="nnUNet_preprocessed/<Dataset> (splits_final.json)")
     ap.add_argument("--phase", default="portal", help="phase to segment (the mask lives on it)")
+    ap.add_argument("--phases", nargs="+", choices=["non_contrast", "arterial", "portal", "delayed"])
+    ap.add_argument("--model-name", default="nnunet-3d_fullres")
     ap.add_argument("--kfold", type=int, default=5)
     ap.add_argument("--copy", action="store_true", help="copy images instead of symlinking")
     ap.add_argument("--dump-splits", default=None)

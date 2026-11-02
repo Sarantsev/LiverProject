@@ -71,6 +71,11 @@ diff work/splits_cls.json work/splits_seg.json   # empty = identical
 ```
 
 ## Layout
+
+Four segmentation experiments (portal / triphasic / fourphase nnU-Net and a
+paper-inspired ConvNeXt + CSWin dual encoder), setup and full commands:
+[segmentation experiments](SEGMENTATION.md).
+
 ```
 liver_sppvr/
   data/      manifest, dataset (mask_override / roi / mask_noise / clinical), preprocess, augment, clinical

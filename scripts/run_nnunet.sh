@@ -20,7 +20,9 @@ export nnUNet_raw="${nnUNet_raw:-$ROOT/nnUNet_raw}"
 export nnUNet_preprocessed="${nnUNet_preprocessed:-$ROOT/nnUNet_preprocessed}"
 export nnUNet_results="${nnUNet_results:-$ROOT/nnUNet_results}"
 DATASET_ID="${DATASET_ID:-501}"
-DATASET="Dataset${DATASET_ID}_MCTLiver"
+DATASET="${DATASET:-Dataset${DATASET_ID}_MCTLiver}"
+read -r -a PHASES <<< "${INPUT_PHASES:-portal}"
+KFOLD="${KFOLD:-5}"
 TRAINER="${TRAINER:-nnUNetTrainer_250epochs}"
 CONFIG="3d_fullres"
 NNENV="${NNENV:-$ROOT/nnunet_env}"
@@ -31,7 +33,9 @@ if [ -z "$SEGVOL_PY" ]; then
     [ -x "$c" ] && { SEGVOL_PY="$c"; break; }
   done
 fi
-WORK="$ROOT/work/segA"
+WORK="${WORK:-$ROOT/work/segA}"
+TASK_CONFIG="${TASK_CONFIG:-$ROOT/configs/default.yaml}"
+SPLITS_OUT="${SPLITS_OUT:-$ROOT/work/splits_seg.json}"
 mkdir -p "$nnUNet_raw" "$nnUNet_preprocessed" "$nnUNet_results" "$WORK"
 
 cmd="${1:-help}"
@@ -71,9 +75,9 @@ print("trainers with a shortened schedule:", epochs or "(none found -- use TRAIN
 PY
     ;;
   export)
-    cd "$ROOT" && PYTHONPATH=. "$SEGVOL_PY" scripts/export_nnunet.py --config configs/default.yaml \
+    cd "$ROOT" && PYTHONPATH=. "$SEGVOL_PY" scripts/export_nnunet.py --config "$TASK_CONFIG" \
       --out "$nnUNet_raw/$DATASET" --preprocessed-dir "$nnUNet_preprocessed/$DATASET" \
-      --dump-splits "$ROOT/work/splits_seg.json"
+      --phases "${PHASES[@]}" --kfold "$KFOLD" --dump-splits "$SPLITS_OUT"
     ;;
   plan)
     "$NNENV/bin/nnUNetv2_plan_and_preprocess" -d "$DATASET_ID" --verify_dataset_integrity -c "$CONFIG"
@@ -84,21 +88,28 @@ PY
     CUDA_VISIBLE_DEVICES="$gpu" "$NNENV/bin/nnUNetv2_train" "$DATASET_ID" "$CONFIG" "$fold" -tr "$TRAINER" --npz
     ;;
   train-all)
-    ( for f in 0 2 4; do CUDA_VISIBLE_DEVICES=0 "$NNENV/bin/nnUNetv2_train" "$DATASET_ID" "$CONFIG" "$f" -tr "$TRAINER" --npz; done ) \
-      > "$WORK/train_gpu0.log" 2>&1 &
-    ( for f in 1 3;   do CUDA_VISIBLE_DEVICES=1 "$NNENV/bin/nnUNetv2_train" "$DATASET_ID" "$CONFIG" "$f" -tr "$TRAINER" --npz; done ) \
-      > "$WORK/train_gpu1.log" 2>&1 &
-    echo "training folds 0,2,4 on GPU0 and 1,3 on GPU1 in background; logs: $WORK/train_gpu*.log"
+    read -r -a GPUS <<< "${GPUS:-0 1}"
+    pids=()
+    for j in "${!GPUS[@]}"; do
+      ( for ((f=j; f<KFOLD; f+=${#GPUS[@]})); do
+          CUDA_VISIBLE_DEVICES="${GPUS[$j]}" "$NNENV/bin/nnUNetv2_train" "$DATASET_ID" "$CONFIG" "$f" -tr "$TRAINER" --npz
+        done ) > "$WORK/train_gpu${GPUS[$j]}.log" 2>&1 &
+      pids+=("$!")
+    done
+    failed=0
+    for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+    exit "$failed"
     ;;
   predict-oof)
-    for f in 0 1 2 3 4; do
-      gpu=$(( f % 2 ))
+    read -r -a GPUS <<< "${GPUS:-0 1}"
+    for ((f=0; f<KFOLD; f++)); do
+      gpu="${GPUS[$((f % ${#GPUS[@]}))]}"
       CUDA_VISIBLE_DEVICES="$gpu" "$NNENV/bin/nnUNetv2_predict" -i "$nnUNet_raw/$DATASET/oof/fold$f" \
         -o "$WORK/oof/fold$f" -d "$DATASET_ID" -c "$CONFIG" -f "$f" -tr "$TRAINER"
     done
     ;;
   collect)
-    cd "$ROOT" && PYTHONPATH=. "$SEGVOL_PY" scripts/export_nnunet.py --config configs/default.yaml --collect \
+    cd "$ROOT" && PYTHONPATH=. "$SEGVOL_PY" scripts/export_nnunet.py --config "$TASK_CONFIG" --collect \
       --out "$nnUNet_raw/$DATASET" --preprocessed-dir "$nnUNet_preprocessed/$DATASET" \
       --pred-dir "$WORK/oof" --work-dir "$WORK"
     ;;
