@@ -19,6 +19,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export nnUNet_raw="${nnUNet_raw:-$ROOT/nnUNet_raw}"
 export nnUNet_preprocessed="${nnUNet_preprocessed:-$ROOT/nnUNet_preprocessed}"
 export nnUNet_results="${nnUNet_results:-$ROOT/nnUNet_results}"
+# Avoid failing a training run on corrupt Inductor autotuning cache entries.
+export nnUNet_compile="${nnUNet_compile:-false}"
 DATASET_ID="${DATASET_ID:-501}"
 DATASET="${DATASET:-Dataset${DATASET_ID}_MCTLiver}"
 read -r -a PHASES <<< "${INPUT_PHASES:-portal}"

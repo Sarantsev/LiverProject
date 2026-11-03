@@ -33,6 +33,8 @@ export GPUS="0 1"  # use GPUS="0" for a single GPU
 
 The existing setup installs CUDA-12.1 wheels; adapt that installation to the
 GPU driver's supported PyTorch/CUDA combination if necessary.
+The runner disables torch.compile by default to avoid Inductor autotuning
+cache failures. Set nnUNet_compile=true explicitly to opt into compilation.
 The ConvNeXt branch downloads timm ImageNet weights on its first training run.
 Use --no-pretrained only for smoke checks or a separately labelled ablation.
 
